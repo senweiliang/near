@@ -100,9 +100,9 @@ String? _peerPreview(Chat chat, Peer? peer) {
   final mine = recent.fromId == chat.myId;
   String body;
   if (recent.hasFile) {
-    body = recent.fileName ?? 'File';
+    body = '[${recent.fileName ?? 'File'}]';
   } else if (recent.hasImage) {
-    body = 'Photo';
+    body = '[Photo]';
   } else {
     body = recent.text.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
