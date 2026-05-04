@@ -2205,10 +2205,36 @@ class _NamePrompt extends StatefulWidget {
 
 class _NamePromptState extends State<_NamePrompt> {
   final _ctrl = TextEditingController();
+  final _focus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    final entry = widget.entryAnim;
+    if (entry == null) {
+      // No hero animation in flight — focus immediately so the keyboard
+      // can come up while the user is reading the prompt.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focus.requestFocus();
+      });
+    } else {
+      // Wait for the hero to finish before focusing. Otherwise the
+      // soft keyboard pops up mid-animation, the layout reflows, and
+      // the measured target rect goes stale → "Near." jumps at the end.
+      void onStatus(AnimationStatus s) {
+        if (s == AnimationStatus.completed) {
+          entry.removeStatusListener(onStatus);
+          if (mounted) _focus.requestFocus();
+        }
+      }
+      entry.addStatusListener(onStatus);
+    }
+  }
 
   @override
   void dispose() {
     _ctrl.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
@@ -2290,7 +2316,7 @@ class _NamePromptState extends State<_NamePrompt> {
                       horizontal: 16, vertical: 12),
                   child: TextField(
                     controller: _ctrl,
-                    autofocus: true,
+                    focusNode: _focus,
                     style: AppFonts.body(size: 15, color: AppColors.ink),
                     decoration: InputDecoration(
                       isCollapsed: true,
