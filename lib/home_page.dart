@@ -789,11 +789,21 @@ class _ConversationPageState extends State<_ConversationPage> {
   final _inputFocus = FocusNode();
   final _scroll = ScrollController();
 
+  bool _initialSettled = false;
+
   @override
   void initState() {
     super.initState();
     widget.chat.addListener(_onChange);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToEnd());
+    // List is rendered with opacity 0 until the first jumpTo completes,
+    // so the user never sees a "scroll-down-from-top" flash during the
+    // route transition. With few messages the jumpTo is a no-op and the
+    // list reveals in its natural top-anchored position.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _jumpToEnd();
+      setState(() => _initialSettled = true);
+    });
   }
 
   @override
@@ -1151,6 +1161,8 @@ class _ConversationPageState extends State<_ConversationPage> {
             child: visible.isEmpty
                 ? _EmptyState(isEveryone: isEveryone, name: title)
                 : SelectionArea(
+                    child: Opacity(
+                    opacity: _initialSettled ? 1.0 : 0.0,
                     child: ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
@@ -1204,6 +1216,7 @@ class _ConversationPageState extends State<_ConversationPage> {
                         ],
                       );
                     },
+                  ),
                   ),
                   ),
           ),
