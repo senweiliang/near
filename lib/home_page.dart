@@ -102,7 +102,7 @@ String? _peerPreview(Chat chat, Peer? peer) {
   if (recent.hasFile) {
     body = '[${recent.fileName ?? 'File'}]';
   } else if (recent.hasImage) {
-    body = '[Photo]';
+    body = '[Image]';
   } else {
     body = recent.text.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
