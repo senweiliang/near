@@ -1,10 +1,12 @@
-# Near (lan_chat) — 项目速览
+# Near — 项目速览
 
-跨平台（macOS / iOS / Android）局域网点对点聊天工具。零配置发现 + WebSocket P2P 传输 + 文本/图片/文件三类消息，无服务器、不落库。
+跨平台（macOS / iOS / Android / Windows）局域网点对点聊天工具。零配置发现 + WebSocket P2P 传输 + 文本/图片/文件三类消息，无服务器、不落库。
 
-应用展示名 **Near**，包/模块名仍为 `lan_chat`（见 `pubspec.yaml`、`main.dart` 中 `MaterialApp.title`）。
+包名 `near`（`pubspec.yaml`），bundle ID `com.near.app`（iOS / macOS / Android applicationId 三端统一）。GitHub: `senweiliang/near` (private)。
 
-> **构建/启动约定**：在 mac 上要测试时，**直接 `flutter build macos --release` + `open .../Release/lan_chat.app`**。Debug build 跟 Release 是不同 binary，会被 macOS 视为新 app，Local Network / mDNS 权限要重新弹窗授权——容易出现"粘贴 OK 但连不上 peer"这种假阳性。Release build 跟用户日常双击的是同一签名同一路径，权限沿用，所见即所得。
+> **构建/启动约定**：
+> - **mac**：要测试时直接 `flutter build macos --release` + `open .../Release/near.app`。Debug build 跟 Release 是不同 binary，会被 macOS 视为新 app，Local Network / mDNS 权限要重新弹窗授权——容易出现"粘贴 OK 但连不上 peer"这种假阳性。Release build 跟用户日常双击的是同一签名同一路径，权限沿用，所见即所得。
+> - **Windows**：本地无 Windows 机器，由 `.github/workflows/build-windows.yml` 在 GitHub Actions `windows-latest` runner 上构建，产物为 artifact `near-windows-x64.zip`。workflow 在 CI 上跑 `flutter create --platforms=windows .` 重新生成 `windows/` 脚手架，所以脚手架不入库。
 
 ---
 
@@ -25,10 +27,10 @@
 | --- | --- |
 | `main.dart` | App entrypoint。劫持 `debugPrint` 把 `[xxx]` 前缀日志注入 `AppLog`；macOS 用 `MethodChannel('near.window/ready')` 通知原生窗口就绪 |
 | `theme.dart` | `AppColors` 调色板 + `AppFonts.body()` / `AppFonts.mono()` 工厂 |
-| `discovery.dart` | mDNS 广播 + 监听。服务类型 `_lanchat._tcp`，attributes 携带 `id` / `name`。`updateName()` 通过 stop+start 重新广播触发对端刷新 |
+| `discovery.dart` | mDNS 广播 + 监听。服务类型 `_near._tcp`，attributes 携带 `id` / `name`。`updateName()` 通过 stop+start 重新广播触发对端刷新 |
 | `transport.dart` | WebSocket 连接管理。dual-stack server、IPv4 lookup、ID 去重、keepalive、redial、文件分块传输 |
 | `peer.dart` | `Peer` 模型（id/name/host/port + `online` flag + `lastActiveAt` 用于 LRU 排序）+ `ChatMessage` 模型（含 `SendStatus`、图片 base64 缓存、文件元信息、`bytesTransferred`、offer 三态 flag、`fanout` per-peer 状态表）+ `FanoutState` / `FanoutEntry`（仅 sender 端用，不进 wire format） |
-| `chat.dart` | `Chat extends ChangeNotifier`：粘合 discovery + transport，维护 `messages` / `peers` / ack timer / 文件接收 sink；Android 通过 `MethodChannel('lanchat/files')` 走 MediaStore |
+| `chat.dart` | `Chat extends ChangeNotifier`：粘合 discovery + transport，维护 `messages` / `peers` / ack timer / 文件接收 sink；Android 通过 `MethodChannel('near/files')` 走 MediaStore |
 | `home_page.dart` | 单文件大屏：Splash / NamePrompt / PeerList / Conversation 全在这里。约 2400 行，是后续优化的主战场 |
 | `settings_page.dart` | 改昵称 + 查看调试日志 |
 | `log.dart` | 内存环形缓冲，给 settings 页展示 |
@@ -105,7 +107,7 @@ PeerList tile 的 meta 行通过顶层 `_peerPreview(chat, peer)` 计算最近�
 ### Android 文件落地
 不能写 `getApplicationDocumentsDirectory`（用户看不到），必须走 MediaStore。`chat.dart` 里 `_androidChain[msgId]` 是个 `Future<void>` 链，把 `appendChunk` 串行化，否则原生侧 fd 写入会乱序。`finishIncoming` 收到 `file_end` 时被调用拿到最终 content URI。
 
-iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/lanchat_files/{msgId}__{safeName}` 私有目录，再通过 share_plus / open_filex 暴露。
+iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/near_files/{msgId}__{safeName}` 私有目录，再通过 share_plus / open_filex 暴露。
 
 ### 图片压缩
 长边 > 1280 时 `image.copyResize`，再 `encodeJpg(quality: 80)`。`prepareImage` + `completeImage` 两步：先用原始 bytes 做预览插入会话，压缩跑完后替换 imageBase64 再真正发送，UI 不阻塞。
@@ -236,10 +238,10 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 
 - **macOS**
   - `macos/Runner/DebugProfile.entitlements` + `Release.entitlements` 必须开 `com.apple.security.network.server` / `client` / `com.apple.security.app-sandbox` 配合的 mDNS 权限
-  - `Info.plist` 里 `NSBonjourServices` 要包含 `_lanchat._tcp`
+  - `Info.plist` 里 `NSBonjourServices` 要包含 `_near._tcp`
   - 图片保存：sandbox 不能默认写 `~/Downloads`，需要 entitlement `com.apple.security.files.downloads.read-write`。开了之后用 `path_provider.getDownloadsDirectory()` 拿到真实 `~/Downloads` 直接写文件，不用弹 saveFile 对话框（mac 桌面用户更习惯 Finder 路径而非 Photos.app）
   - `NSPhotoLibraryAddUsageDescription` 仍然保留，便于 iOS / Android fallback 路径
-- **Android**：`MethodChannel('lanchat/files')` 实现 `beginIncoming` / `appendChunk` / `finishIncoming`，落地到 MediaStore Downloads
+- **Android**：`MethodChannel('near/files')` 实现 `beginIncoming` / `appendChunk` / `finishIncoming`，落地到 MediaStore Downloads
 - **iOS**：Local Network 权限 + Bonjour services 声明在 `Info.plist`
 
 ### 图片保存路径分支（`home_page.dart:_save`）

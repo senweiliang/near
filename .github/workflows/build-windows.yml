@@ -1,0 +1,44 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Generate Windows platform scaffold
+        run: flutter create --platforms=windows --project-name=near .
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Package release directory
+        shell: pwsh
+        run: |
+          $src = "build/windows/x64/runner/Release"
+          $dst = "near-windows-x64.zip"
+          Compress-Archive -Path "$src/*" -DestinationPath $dst -Force
+          Get-ChildItem $dst | Format-List
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: near-windows-x64
+          path: near-windows-x64.zip
+          retention-days: 14
