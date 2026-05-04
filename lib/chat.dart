@@ -25,6 +25,9 @@ class Chat extends ChangeNotifier {
   final Map<String, String> _androidSessions = {};
   final Map<String, Future<void>> _androidChain = {};
   final Map<String, File> _outgoingFiles = {};
+  // bonsoir_android 的 lost 事件 attrs 不可靠（拿到的是本机自己的 attrs），
+  // 需要按 mDNS service.name 反查真实 peerId。`_onPeerFound` 时维护映射。
+  final Map<String, String> _svcNameToPeerId = {};
 
   bool autoAcceptFiles = true;
 
@@ -71,6 +74,8 @@ class Chat extends ChangeNotifier {
       onFileDecline: _onFileDecline,
       onFileChunk: _onFileChunk,
       onFileEnd: _onFileEnd,
+      onChannelEstablished: _onChannelEstablished,
+      onChannelClosed: _onChannelClosed,
     );
     final port = await _transport.startServer();
 
@@ -131,6 +136,7 @@ class Chat extends ChangeNotifier {
     if (id == null) return;
     final host = svc.host;
     if (host == null) return;
+    _svcNameToPeerId[svc.name] = id;
     // 保留之前的 lastActiveAt（同一 peer 重新发现，保留聊天活跃记录用于 LRU 排序）
     final prev = peers[id];
     final peer = Peer(
@@ -160,7 +166,9 @@ class Chat extends ChangeNotifier {
   }
 
   void _onPeerLost(BonsoirService svc) {
-    final id = svc.attributes['id'];
+    // bonsoir_android 在 lost 事件里 attrs 是本机自己的（broadcast attrs），
+    // 不能拿来当 peerId。先按 svc.name 反查 _onPeerFound 时记的真实 id。
+    final id = _svcNameToPeerId[svc.name] ?? svc.attributes['id'];
     if (id == null) return;
     // Channel 还活着说明对端真的在线，mDNS 的 lost 事件可能是重广播抖动 —— 忽略
     if (_transport.hasChannelTo(id)) {
@@ -170,6 +178,25 @@ class Chat extends ChangeNotifier {
     // 不删除 peer，保留聊天记录入口；只标 offline，UI 把 presence 点变灰
     final p = peers[id];
     if (p != null && p.online) {
+      debugPrint('[chat] mDNS lost $id (svc=${svc.name}) → mark offline');
+      p.online = false;
+      notifyListeners();
+    }
+  }
+
+  void _onChannelEstablished(String peerId) {
+    final p = peers[peerId];
+    if (p != null && !p.online) {
+      debugPrint('[chat] channel up $peerId → mark online');
+      p.online = true;
+      notifyListeners();
+    }
+  }
+
+  void _onChannelClosed(String peerId) {
+    final p = peers[peerId];
+    if (p != null && p.online) {
+      debugPrint('[chat] channel down $peerId → mark offline');
       p.online = false;
       notifyListeners();
     }

@@ -123,13 +123,21 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+class _HomePageState extends State<HomePage>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   final _chat = Chat();
   bool _started = false;
   bool _bootstrapping = true;
   bool _splashVisible = true;
   double _splashOpacity = 1.0;
   String? _error;
+
+  late final AnimationController _heroCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 700),
+  );
+  final GlobalKey _namePromptNearKey = GlobalKey();
+  Rect? _nearTargetRect;
 
   // 未读：null 表示全员；其他为 peerId
   final Map<String?, int> _unread = {};
@@ -159,19 +167,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     await minSplash;
     if (!mounted) return;
-    setState(() {
-      _bootstrapping = false;
-      _splashOpacity = 0.0;
-    });
-    await Future<void>.delayed(const Duration(milliseconds: 450));
-    if (!mounted) return;
-    setState(() => _splashVisible = false);
+
+    if (!_started) {
+      // First-run: render NamePrompt below splash, measure Near. target,
+      // then run hero animation while other elements fade in.
+      setState(() => _bootstrapping = false);
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      final ctx = _namePromptNearKey.currentContext;
+      if (ctx != null) {
+        final box = ctx.findRenderObject() as RenderBox?;
+        if (box != null && box.hasSize) {
+          _nearTargetRect = box.localToGlobal(Offset.zero) & box.size;
+        }
+      }
+      setState(() {});
+      await _heroCtrl.forward();
+      if (!mounted) return;
+      setState(() => _splashVisible = false);
+    } else {
+      setState(() {
+        _bootstrapping = false;
+        _splashOpacity = 0.0;
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      if (!mounted) return;
+      setState(() => _splashVisible = false);
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _chat.removeListener(_onChange);
+    _heroCtrl.dispose();
     super.dispose();
   }
 
@@ -232,7 +261,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final Widget base = _bootstrapping
         ? const SizedBox.shrink()
         : (!_started
-            ? _NamePrompt(onSubmit: _join, error: _error)
+            ? _NamePrompt(
+                onSubmit: _join,
+                error: _error,
+                entryAnim: _heroCtrl,
+                nearKey: _namePromptNearKey,
+              )
             : _PeerListView(
                 chat: _chat,
                 unread: _unread,
@@ -247,12 +281,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           if (_splashVisible)
             Positioned.fill(
               child: IgnorePointer(
-                child: AnimatedOpacity(
-                  opacity: _splashOpacity,
-                  duration: const Duration(milliseconds: 450),
-                  curve: Curves.easeIn,
-                  child: const _SplashView(),
-                ),
+                child: _started
+                    ? AnimatedOpacity(
+                        opacity: _splashOpacity,
+                        duration: const Duration(milliseconds: 450),
+                        curve: Curves.easeIn,
+                        child: const _SplashView(),
+                      )
+                    : _SplashHero(
+                        controller: _heroCtrl,
+                        targetRect: _nearTargetRect,
+                      ),
               ),
             ),
         ],
@@ -1225,6 +1264,59 @@ class _TimeSeparator extends StatelessWidget {
   }
 }
 
+Future<void> _showMessageMenu(
+  BuildContext context,
+  Offset globalPosition,
+  String text,
+) async {
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final selected = await showMenu<String>(
+    context: context,
+    color: AppColors.bgApp,
+    surfaceTintColor: Colors.transparent,
+    elevation: 6,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(10),
+      side: const BorderSide(color: AppColors.line, width: 1),
+    ),
+    position: RelativeRect.fromRect(
+      Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+      Offset.zero & overlay.size,
+    ),
+    items: [
+      PopupMenuItem<String>(
+        value: 'copy',
+        height: 36,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.content_copy, size: 14, color: AppColors.ink2),
+            const SizedBox(width: 10),
+            Text(
+              'Copy',
+              style: AppFonts.body(size: 13, color: AppColors.ink),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+  if (selected == 'copy') {
+    await Clipboard.setData(ClipboardData(text: text));
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text(
+          'Copied',
+          style: AppFonts.body(size: 13, color: Colors.white),
+        ),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(milliseconds: 1200),
+      ),
+    );
+  }
+}
+
 class _MessageBubble extends StatelessWidget {
   final String text;
   final String name;
@@ -1398,30 +1490,37 @@ class _MessageBubble extends StatelessWidget {
                         ),
                       ),
                     if (hasText)
-                      Theme(
-                        data: Theme.of(context).copyWith(
-                          textSelectionTheme: TextSelectionThemeData(
-                            selectionColor: mine
-                                ? Colors.white.withValues(alpha: 0.35)
-                                : AppColors.accent.withValues(alpha: 0.28),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onSecondaryTapUp: (d) =>
+                            _showMessageMenu(context, d.globalPosition, text),
+                        onLongPressStart: (d) =>
+                            _showMessageMenu(context, d.globalPosition, text),
+                        child: Theme(
+                          data: Theme.of(context).copyWith(
+                            textSelectionTheme: TextSelectionThemeData(
+                              selectionColor: mine
+                                  ? Colors.white.withValues(alpha: 0.35)
+                                  : AppColors.accent.withValues(alpha: 0.28),
+                            ),
                           ),
-                        ),
-                        child: Linkify(
-                          text: text,
-                          onOpen: _openLink,
-                          options: const LinkifyOptions(humanize: false),
-                          style: AppFonts.body(
-                            size: 15,
-                            color: textColor,
-                            height: 1.5,
-                          ),
-                          linkStyle: AppFonts.body(
-                            size: 15,
-                            color: textColor,
-                            height: 1.5,
-                          ).copyWith(
-                            decoration: TextDecoration.underline,
-                            decorationColor: textColor,
+                          child: Linkify(
+                            text: text,
+                            onOpen: _openLink,
+                            options: const LinkifyOptions(humanize: false),
+                            style: AppFonts.body(
+                              size: 15,
+                              color: textColor,
+                              height: 1.5,
+                            ),
+                            linkStyle: AppFonts.body(
+                              size: 15,
+                              color: textColor,
+                              height: 1.5,
+                            ).copyWith(
+                              decoration: TextDecoration.underline,
+                              decorationColor: textColor,
+                            ),
                           ),
                         ),
                       ),
@@ -1979,30 +2078,106 @@ class _SplashView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.bgApp,
-      body: Center(
-        child: Text.rich(
-          TextSpan(children: [
-            TextSpan(
-              text: 'Near',
-              style: AppFonts.body(
-                size: 44,
-                weight: FontWeight.w700,
-                letterSpacing: -1.2,
-                height: 1,
-              ),
-            ),
-            TextSpan(
-              text: '.',
-              style: AppFonts.body(
-                size: 44,
-                weight: FontWeight.w700,
-                color: AppColors.accent,
-                height: 1,
-              ),
-            ),
-          ]),
-          textAlign: TextAlign.center,
+      body: Center(child: _NearMark(fontSize: 44, letterSpacing: -1.2)),
+    );
+  }
+}
+
+class _NearMark extends StatelessWidget {
+  final double fontSize;
+  final double letterSpacing;
+  const _NearMark({required this.fontSize, required this.letterSpacing, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text.rich(
+      TextSpan(children: [
+        TextSpan(
+          text: 'Near',
+          style: AppFonts.body(
+            size: fontSize,
+            weight: FontWeight.w700,
+            letterSpacing: letterSpacing,
+            height: 1,
+          ),
         ),
+        TextSpan(
+          text: '.',
+          style: AppFonts.body(
+            size: fontSize,
+            weight: FontWeight.w700,
+            color: AppColors.accent,
+            height: 1,
+          ),
+        ),
+      ]),
+      textAlign: TextAlign.center,
+    );
+  }
+}
+
+/// Splash overlay that morphs the centered "Near." mark into the
+/// NamePrompt's top mark while fading the white background out.
+class _SplashHero extends StatelessWidget {
+  final AnimationController controller;
+  final Rect? targetRect;
+  const _SplashHero({required this.controller, required this.targetRect});
+
+  static const double _initialFontSize = 44;
+  static const double _initialLetterSpacing = -1.2;
+  static const double _finalFontSize = 36;
+  static const double _finalLetterSpacing = -1.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final tr = targetRect;
+    if (tr == null) {
+      // Target rect not measured yet — keep the static splash visible.
+      return const _SplashView();
+    }
+    final positionAnim = CurvedAnimation(
+      parent: controller,
+      curve: Curves.easeInOutCubic,
+    );
+    final bgFadeAnim = CurvedAnimation(
+      parent: controller,
+      curve: const Interval(0.0, 0.7, curve: Curves.easeIn),
+    );
+    return Material(
+      type: MaterialType.transparency,
+      child: AnimatedBuilder(
+        animation: controller,
+        builder: (ctx, _) {
+          final size = MediaQuery.of(ctx).size;
+          final t = positionAnim.value;
+          final initialCenterY = size.height / 2;
+          final centerY = initialCenterY + (tr.center.dy - initialCenterY) * t;
+          final fontSize = _initialFontSize +
+              (_finalFontSize - _initialFontSize) * t;
+          final letterSpacing = _initialLetterSpacing +
+              (_finalLetterSpacing - _initialLetterSpacing) * t;
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: Opacity(
+                  opacity: 1.0 - bgFadeAnim.value,
+                  child: const ColoredBox(color: AppColors.bgApp),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                top: centerY - fontSize / 2,
+                child: Center(
+                  child: _NearMark(
+                    fontSize: fontSize,
+                    letterSpacing: letterSpacing,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -2015,7 +2190,14 @@ class _SplashView extends StatelessWidget {
 class _NamePrompt extends StatefulWidget {
   final void Function(String) onSubmit;
   final String? error;
-  const _NamePrompt({required this.onSubmit, this.error});
+  final Animation<double>? entryAnim;
+  final Key? nearKey;
+  const _NamePrompt({
+    required this.onSubmit,
+    this.error,
+    this.entryAnim,
+    this.nearKey,
+  });
 
   @override
   State<_NamePrompt> createState() => _NamePromptState();
@@ -2036,6 +2218,44 @@ class _NamePromptState extends State<_NamePrompt> {
     widget.onSubmit(v);
   }
 
+  Widget _wrapEntry(Widget child) {
+    final entry = widget.entryAnim;
+    if (entry == null) return child;
+    final fade = CurvedAnimation(
+      parent: entry,
+      curve: const Interval(0.35, 1.0, curve: Curves.easeIn),
+    );
+    final slide = Tween<Offset>(
+      begin: const Offset(0, 0.12),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: entry,
+      curve: const Interval(0.35, 1.0, curve: Curves.easeOutCubic),
+    ));
+    return FadeTransition(
+      opacity: fade,
+      child: SlideTransition(position: slide, child: child),
+    );
+  }
+
+  Widget _buildNearMark() {
+    final mark = _NearMark(
+      key: widget.nearKey,
+      fontSize: 36,
+      letterSpacing: -1,
+    );
+    final entry = widget.entryAnim;
+    if (entry == null) return mark;
+    // Stay invisible while the splash hero is in flight; pop to full opacity
+    // the moment the controller reaches 1.0 and the splash overlay is removed.
+    return AnimatedBuilder(
+      animation: entry,
+      builder: (_, child) =>
+          Opacity(opacity: entry.value >= 1.0 ? 1.0 : 0.0, child: child),
+      child: mark,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2049,40 +2269,18 @@ class _NamePromptState extends State<_NamePrompt> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text.rich(
-                  TextSpan(children: [
-                    TextSpan(
-                      text: 'Near',
-                      style: AppFonts.body(
-                        size: 36,
-                        weight: FontWeight.w700,
-                        letterSpacing: -1,
-                        height: 1,
-                      ),
-                    ),
-                    TextSpan(
-                      text: '.',
-                      style: AppFonts.body(
-                        size: 36,
-                        weight: FontWeight.w700,
-                        color: AppColors.accent,
-                        height: 1,
-                      ),
-                    ),
-                  ]),
-                  textAlign: TextAlign.center,
-                ),
+                _buildNearMark(),
                 const SizedBox(height: 8),
-                Text(
+                _wrapEntry(Text(
                   'a quiet room on this network',
                   style: AppFonts.mono(
                       size: 11,
                       color: AppColors.ink3,
                       letterSpacing: 0.66),
                   textAlign: TextAlign.center,
-                ),
+                )),
                 const SizedBox(height: 32),
-                Container(
+                _wrapEntry(Container(
                   decoration: BoxDecoration(
                     color: AppColors.surface,
                     border: Border.all(color: AppColors.line),
@@ -2103,9 +2301,9 @@ class _NamePromptState extends State<_NamePrompt> {
                     ),
                     onSubmitted: (_) => _go(),
                   ),
-                ),
+                )),
                 const SizedBox(height: 12),
-                GestureDetector(
+                _wrapEntry(GestureDetector(
                   onTap: _go,
                   child: Container(
                     height: 48,
@@ -2124,15 +2322,15 @@ class _NamePromptState extends State<_NamePrompt> {
                       ),
                     ),
                   ),
-                ),
+                )),
                 if (widget.error != null) ...[
                   const SizedBox(height: 16),
-                  Text(
+                  _wrapEntry(Text(
                     widget.error!,
                     style: AppFonts.body(
                         size: 12, color: const Color(0xFFE53935)),
                     textAlign: TextAlign.center,
-                  ),
+                  )),
                 ],
               ],
             ),

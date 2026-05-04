@@ -19,6 +19,8 @@ class Transport {
   final void Function(String msgId, String fromPeerId) onFileDecline;
   final void Function(String msgId, Uint8List bytes) onFileChunk;
   final void Function(String msgId) onFileEnd;
+  final void Function(String peerId)? onChannelEstablished;
+  final void Function(String peerId)? onChannelClosed;
 
   HttpServer? _server;
   int port = 0;
@@ -39,6 +41,8 @@ class Transport {
     required this.onFileDecline,
     required this.onFileChunk,
     required this.onFileEnd,
+    this.onChannelEstablished,
+    this.onChannelClosed,
   });
 
   String? _peerIdOf(WebSocketChannel ws) {
@@ -123,6 +127,7 @@ class Transport {
               _channels[id] = ws;
               debugPrint(
                   '[transport] channel established with $id, total=${_channels.length}');
+              onChannelEstablished?.call(id);
             case 'msg':
               final inner = m['msg'] as Map<String, dynamic>;
               onMessage(ChatMessage.fromJson(inner));
@@ -207,6 +212,7 @@ class Transport {
         _keepAlive.remove(ws)?.cancel();
         if (peerId != null && _channels[peerId] == ws) {
           _channels.remove(peerId);
+          onChannelClosed?.call(peerId!);
           _scheduleRedial(peerId!);
         }
       },
@@ -230,6 +236,7 @@ class Transport {
         _keepAlive.remove(ws)?.cancel();
         if (peerId != null && _channels[peerId] == ws) {
           _channels.remove(peerId);
+          onChannelClosed?.call(peerId!);
           _scheduleRedial(peerId!);
         }
       },
