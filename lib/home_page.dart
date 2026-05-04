@@ -154,7 +154,7 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> _bootstrap() async {
-    final minSplash = Future<void>.delayed(const Duration(seconds: 3));
+    final minSplash = Future<void>.delayed(const Duration(seconds: 2));
     final testId = Platform.environment['NEAR_TEST_ID'];
     if (testId != null && testId.isNotEmpty) {
       await _join(testId);
