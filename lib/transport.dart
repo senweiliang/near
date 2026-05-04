@@ -101,7 +101,6 @@ class Transport {
       try {
         final token = 'ka-${DateTime.now().microsecondsSinceEpoch}';
         ws.sink.add(jsonEncode({'type': 'ping', 'token': token}));
-        debugPrint('[transport] ka ping → $peerId token=$token');
       } catch (e) {
         debugPrint('[transport] keepalive send failed peerId=$peerId: $e');
       }
@@ -139,7 +138,6 @@ class Transport {
               if (token != null) {
                 try {
                   ws.sink.add(jsonEncode({'type': 'pong', 'token': token}));
-                  debugPrint('[transport] ping ← $peerId token=$token (replied)');
                 } catch (_) {}
               }
             case 'pong':
@@ -148,9 +146,6 @@ class Transport {
                 final c = _pendingProbes.remove(token);
                 if (c != null && !c.isCompleted) {
                   c.complete(true);
-                  debugPrint('[transport] probe pong ← $peerId token=$token');
-                } else {
-                  debugPrint('[transport] ka pong ← $peerId token=$token');
                 }
               }
             case 'file_offer':

@@ -147,7 +147,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _bootstrap() async {
     final minSplash = Future<void>.delayed(const Duration(seconds: 3));
-    final testId = Platform.environment['LAN_CHAT_TEST_ID'];
+    final testId = Platform.environment['NEAR_TEST_ID'];
     if (testId != null && testId.isNotEmpty) {
       await _join(testId);
     } else {

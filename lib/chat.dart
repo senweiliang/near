@@ -37,7 +37,7 @@ class Chat extends ChangeNotifier {
   static const MethodChannel _platform = MethodChannel('near/files');
 
   Future<void> start(String displayName) async {
-    final testId = Platform.environment['LAN_CHAT_TEST_ID'];
+    final testId = Platform.environment['NEAR_TEST_ID'];
     final isTestMode = testId != null && testId.isNotEmpty;
     if (isTestMode) {
       myId = 'test-$testId-${DateTime.now().millisecondsSinceEpoch}';
@@ -84,7 +84,7 @@ class Chat extends ChangeNotifier {
   Future<void> setAutoAcceptFiles(bool v) async {
     if (autoAcceptFiles == v) return;
     autoAcceptFiles = v;
-    final isTestMode = (Platform.environment['LAN_CHAT_TEST_ID'] ?? '').isNotEmpty;
+    final isTestMode = (Platform.environment['NEAR_TEST_ID'] ?? '').isNotEmpty;
     if (!isTestMode) {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kAutoAcceptFiles, v);
