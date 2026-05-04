@@ -1,0 +1,36 @@
+name: near
+description: LAN P2P chat
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  bonsoir: ^5.1.0
+  shelf: ^1.4.1
+  shelf_web_socket: ^3.0.0
+  web_socket_channel: ^3.0.0
+  uuid: ^4.5.0
+  shared_preferences: ^2.3.2
+  cupertino_icons: ^1.0.8
+  google_fonts: ^6.2.1
+  file_picker: ^8.1.2
+  image: ^4.5.4
+  flutter_linkify: ^6.0.0
+  url_launcher: ^6.3.0
+  gal: ^2.3.0
+  path_provider: ^2.1.4
+  open_filex: ^4.5.0
+  share_plus: ^10.0.0
+  super_clipboard: ^0.9.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
