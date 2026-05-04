@@ -51,6 +51,9 @@ class Chat extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final storedName = prefs.getString('myName');
       myName = storedName ?? displayName;
+      if (storedName == null && myName.trim().isNotEmpty) {
+        await prefs.setString('myName', myName);
+      }
       var stored = prefs.getString('myId');
       if (stored == null) {
         stored = const Uuid().v4();
