@@ -56,8 +56,9 @@ mDNS 解析出的主机名（`xxx.local.`）在某些网络下会优先解析到
 
 ### Keepalive + 后台恢复探活
 - 每条 channel 10s 周期 ping，token 携带时间戳
-- App 从后台 resume：`Chat.onAppResumed()` 对所有 connected peer 发 1s 超时的 probe ping，挂的丢弃 + redial。这是修过的实战 bug —— iOS 切后台几秒回来 socket 已经死了但没收到 close frame
-- `_keepAliveInterval = 10s` 定在 `transport.dart:26`
+- App 从后台 resume：`Chat.onAppResumed()` 对所有 connected peer 发 1s 超时的 probe ping，挂的丢弃 + redial。修了 iOS 切后台几秒回来 socket 已经死了但没收到 close frame 的 bug
+- **probe 不再用于文件传输健康检查**：原来 sender 端假死靠 onAppResumed probe 间接发现，但 probe 跟 file_chunk 共用同一个 sink — chunk 排队时 pong 也排队，1s 超时下 sender 经常被误判 dead 然后被 dropPeer 中断传输（receiver 切回前台触发 probe 是典型场景）。现在文件流自带窗口化 ack + 15s idle watchdog（`_kAckIdleTimeout`），probe 仅用作"刚 resume 时快速判一次连接还在不在"的副作用，文件传输不再依赖它
+- `_keepAliveInterval = 10s` 定在 `transport.dart`
 
 ### mDNS lost 抖动 + bonsoir_android attrs 错位
 两个独立坑加在一起处理：
@@ -98,9 +99,10 @@ PeerList tile 的 meta 行通过顶层 `_peerPreview(chat, peer)` 计算最近�
 分两段：先协商，再传输；群聊场景按 peer 独立跟踪状态。
 
 1. **协商**：sender 发 `file_offer`（携带 ChatMessage 元数据，无字节）。receiver 根据 `autoAcceptFiles` 设置决定立即回复 `file_accept` 或先把 bubble 标 `awaitingAccept` 等用户点 Accept/Ignore，对应回 `file_accept` 或 `file_decline`
-2. **传输**：sender 收到 `file_accept` 后才开始 `file_chunk(id, seq, data=base64)` → `file_end(id)`。chunk size 64KB，每个 chunk 之间 `await Future<void>.delayed(Duration.zero)` 让 event loop 处理网络
-3. **群聊 fanout**：`sendFile` 时按 `connectedPeerIds`（私聊则是 `[toId]`）把每个 peer 写进 `msg.fanout` 表，初始 `FanoutState.offered`。`file_offer` 广播给所有 channel
-   - **首个 `file_accept` 进来**：该 entry → `sending`，清 `msg.offerPending`（让 progress bar 开始动），单独跑 `sendFileBytes(file, [thatPeerId])`，progress 写到 `entry.bytesTransferred`
+2. **传输（窗口化 ack）**：sender 收到 `file_accept` 后开始 `file_chunk(id, seq, data=base64)` → `file_end(id)`。chunk size 64KB，sender 维护 per-msgId 的 `_OutgoingFlow`，inflight bytes 上限 1 MB（约 16 个 chunk）。窗口满时主循环挂在 `slotWaiter` Completer 上等。**receiver 每写完一个 chunk 回 `file_chunk_ack(id, seq)`**（Android 走 `_androidChain` 异步链，链尾 ack；其他平台 `sink.add` 后立即 ack），sender 收到 ack 推进窗口 + 累加 acked 字节作进度。`file_end` 在所有 inflight 都 ack 后才发，确保 receiver 端 sink 已 flush 全部字节
+3. **传输健康检查**：sender 端每条流挂一个 2s 周期 watchdog，**`_kAckIdleTimeout = 15s`** 内没收到任何新 ack → 整体 fail。channel 关闭时 `_failFlowsOf(peerId)` 唤醒所有挂在 slotWaiter 上的 sender 循环，避免永远等。**这套 in-band 检测取代了过去依赖 `onAppResumed` probe + 文本 ACK 500ms 超时来兜文件场景的设计**，sender 不再误判活的为死的，也不会在对端真死时误标 delivered（旧 fire-and-forget 实现的失败模式）
+4. **群聊 fanout**：`sendFile` 时按 `connectedPeerIds`（私聊则是 `[toId]`）把每个 peer 写进 `msg.fanout` 表，初始 `FanoutState.offered`。`file_offer` 广播给所有 channel
+   - **首个 `file_accept` 进来**：该 entry → `sending`，清 `msg.offerPending`（让 progress bar 开始动），单独跑 `sendFileBytes(file, thatPeerId)`，progress 是 receiver ack 累计字节
    - **`file_decline`**：entry → `declined`（**注意：不是 `failed`**，declined 是接收方主动拒绝，正常终态，不算发送失败）
    - **该 peer 传输 onError**：entry → `failed`（真正的传输错误）
    - 都**不影响其他 peer**（修过 v1 实现里"1 人 decline 误杀全员 / 多 accept 共用一个 progress 变量乱跳 / `_outgoingFiles` 提前清掉"三连 bug）
@@ -112,9 +114,11 @@ PeerList tile 的 meta 行通过顶层 `_peerPreview(chat, peer)` 计算最近�
    - 文件被读多次（每个 acceptor 一份独立流），实现简单。带宽友好的"一份流广播给所有 acceptors"留作优化项
    - `msg.bytesTransferred` 改为派生：取所有 fanout entry 的最大值，progress bar 单调前进不抖动
 
-文件 ACK 不走 `_ackTimers`，由 `sendFileBytes` 的 onComplete/onError 回调直接改 status —— 文件可能传几分钟，不能用 500ms 文本 ACK 超时来判。
+文本消息的 `_ackTimers` 500ms 超时是 IM 即时反馈用的；文件场景由窗口化 ack 自身决定 status — onComplete 表示对端最后一个 chunk 也 ack 完成（真 delivered），onError 来自 sink 写抛错 / channel close / `_kAckIdleTimeout` 触发。
 
 发送方在等待 accept 期间通过 `_outgoingFiles[msgId]` 持有 `File` 对象引用，accept 来到时再打开读取。如果文件已被外部删除，`file.open()` 抛错走 onError 标 failed。
+
+receiver 侧 `_incomingFrom[msgId] → fromPeerId` 用于 `_onChannelClosed` 时定位并清理对应方向上还在 pending 的接收任务（关 sink、清 `_androidChain` / `_androidSessions`、msg 标 failed），避免 channel 断了 sink 还挂着泄漏 + bubble 永远 pending。
 
 ### Android 后台保活：foreground service（opt-in）
 Android 系统在 app `paused` 后约 5 秒就会切断 wifi socket，导致 channel 死掉、对端 send 没人收。"允许后台运行"（电池白名单）只防止进程被杀，**不**保证网络。要真后台收消息，唯一合法解就是 foreground service + 常驻通知。
@@ -178,8 +182,9 @@ iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/near_files/{msgId}
    - **Material 上下文**：splash overlay 必须包 `Material(type: transparency)`，否则 Text 拿不到 `DefaultTextStyle`，会用 fallback debug 字体（带黄色双下划线 + 字形基线偏移），swap 时 NEAR. 视觉跳几像素
 2. **NamePrompt**：首次启动输入昵称；输入提交 → `chat.start(name)` 内会把 myName 写入 SharedPreferences，下次直接进 PeerList
 3. **PeerList（主屏）**
-   - **Hero header**：自己头像 (42px) + 昵称 (18px/700/-0.3 letter-spacing) + `@xxxx` short handle (mono 11px) + **第三行 mono 副标 `link-local · peer-to-peer · no record`** (mono 10.5px)；整块点击进 Settings。features tagline 从 meta 卡上移到这里 —— 跟 user identity 同列「stable info」，meta 卡不再有 wrap 风险
-   - **Room meta 卡**：5 张堆叠 mini avatar（自己 + 4 个 online peer）+ "**N nearby on this network**"（N **不含自己**，纯 peers 数）；不再带 mono 副标
+   - **Hero header**：自己头像 (42px) + 昵称 (18px/700/-0.3 letter-spacing) + 下方 `@xxxx` short handle (mono 11px)；整块点击进 Settings
+   - **Room meta 卡**（F2 layout）：上半 row 是 presence stack + "**N nearby on this network**"（N **不含自己**，纯 peers 数），下半通过 1px 全宽 divider 隔开，居中放 mono 副标 `link-local · peer-to-peer · no record` (10.5px)。整体外层 `Container(clipBehavior: Clip.antiAlias)` 把 divider 裁到圆角内。features 留在 meta 卡而不挪到 hero 是因为：在群聊语境（"the room"）下 features 跟"当前网络状态"同源，留在一张卡更收敛
+   - **Presence stack 上限 + 溢出**：最多展示 5 个圆头像（自己 + 4 个 online peer），超出走 `_MiniAv(overflow: true)` 渲染一个 mono `+N` tile（bgApp 底 + line 1px 描边 + ink3 字，跟普通头像视觉区分，避免被误读成 6 号头像）
    - SECTION header：mono 11px / 0.66 letter-spacing 大写；右侧显示 `online / total` 比值（全员 online 时仅显示总数）
    - Peer 列表：群聊 `Everyone here` 置顶，下面是 peer 条目（unread badge）
      - **LRU 排序**：聊过的浮在前（按 `lastActiveAt` 倒序），没聊过的按发现顺序排在后
@@ -252,8 +257,9 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 { "type": "file_offer",   "msg": { /* ChatMessage with fileName/fileSize/fileMime */ } }
 { "type": "file_accept",  "id":  "<msgId>" }
 { "type": "file_decline", "id":  "<msgId>" }
-{ "type": "file_chunk",   "id":  "<msgId>", "seq": 0, "data": "<base64>" }
-{ "type": "file_end",     "id":  "<msgId>" }
+{ "type": "file_chunk",     "id":  "<msgId>", "seq": 0, "data": "<base64>" }
+{ "type": "file_chunk_ack", "id":  "<msgId>", "seq": 0 }
+{ "type": "file_end",       "id":  "<msgId>" }
 ```
 
 `ChatMessage.toJson()`：`id` / `fromId` / `fromName` / `text` / `ts`（ms）/ `toId?` / `image?`(base64) / `imageMime?` / `fileName?` / `fileSize?` / `fileMime?`。`toId == null` 表示群发。
@@ -287,7 +293,7 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 - 文件传输无并发控制：多文件同时发会顺序排队但不会丢，注意大文件 base64 占用内存
 - **群聊文件「一份流广播」未做**：当前每个 acceptor 独立读一遍文件 + 独立 `sendFileBytes`，N 个 acceptor 就读 N 遍。优化方向 — 第一个 accept 就开始读 + 广播给已 accept 集合；新 accept 进来时若还在传，加入正在 broadcast 的 channel set；若已传完，再为后到 accept 单独跑一份
 - 没有消息持久化：app 杀掉后历史就没了。这是设计如此（"no record"），但如果未来要加，建议落 SQLite + 选择性保留最近 N 条
-- ACK 超时 500ms 在跨子网或慢 Wi-Fi 上偏短，但加大会让"对方掉线"的反馈延迟。可考虑随网络质量自适应
+- 文本 ACK 超时 500ms 在跨子网或慢 Wi-Fi 上偏短，但加大会让"对方掉线"的反馈延迟。可考虑随网络质量自适应（文件传输已迁移到窗口化 ack，不受这个超时影响）
 - **群聊 fanout 按"快照"，不跟随 peer 进出**：`sendFile` 时刻的 `connectedPeerIds` 决定 fanout 表，之后即使有新 peer 加入也收不到这条 offer，已断开的 peer 不会从 fanout 移除（永远停在 `offered`，导致 `_maybeFinalizeFanout` 永远不收敛）。修法：`_onPeerLost` 时遍历 `_outgoingFiles` 把对应 entry 标 `declined`，触发 finalize
 - **测试设备**：同机跑两个 sandboxed mac 实例不能真实模拟（共享 container + 同 bundleId mDNS 行为异常 + loopback sandbox 限制）。需要至少两台物理设备；测 `K of N` 群聊聚合需要 ≥ 3 端
 - **多实例本地测试**：通过 `NEAR_TEST_ID=alice ./build/macos/Build/Products/Release/near.app/Contents/MacOS/near &` 启动独立实例（不读 SharedPreferences、用独立 myId / 独立 `near_files_$testId` 文件缓存目录、强制 autoAcceptFiles=true）。同机两实例之间 dial loopback 时 dedupe 风暴有真 bug —— alice/bob 同机互联会出 `dedupe close` 死循环，偶发 SIGSEGV，跨机正常
