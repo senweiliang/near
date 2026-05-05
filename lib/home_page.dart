@@ -429,7 +429,7 @@ class _PeerListView extends StatelessWidget {
                               ),
                             ),
                             TextSpan(
-                              text: ' in this room',
+                              text: ' on this network',
                               style: AppFonts.body(
                                 size: 13.5,
                                 weight: FontWeight.w600,
@@ -493,7 +493,7 @@ class _PeerListView extends StatelessWidget {
                     avatar: const _GroupAvatar(),
                     title: 'Everyone here',
                     meta: _peerPreview(chat, null) ??
-                        '$onlineCount in the room · open to all',
+                        '$onlineCount here · open to all',
                     unread: everyoneUnread,
                     onTap: onTapEveryone,
                   ),
@@ -1086,7 +1086,7 @@ class _ConversationPageState extends State<_ConversationPage> {
     final peer = isEveryone ? null : chat.peers[widget.recipientId];
     final title = isEveryone ? 'Everyone here' : (peer?.name ?? 'Unknown');
     final sub = isEveryone
-        ? '${chat.peers.length + 1} in the room · open to all'
+        ? '${chat.peers.length + 1} here · open to all'
         : (peer == null
             ? 'unknown peer'
             : (peer.online
