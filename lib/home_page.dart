@@ -423,26 +423,36 @@ class _PeerListView extends StatelessWidget {
                           ]),
                           const SizedBox(width: 12),
                           Expanded(
-                            child: Text.rich(TextSpan(children: [
-                              TextSpan(
-                                text: '${onlinePeers.length} nearby',
-                                style: AppFonts.body(
-                                  size: 13.5,
-                                  weight: FontWeight.w700,
-                                  color: AppColors.accent,
-                                  height: 1.2,
-                                ),
-                              ),
-                              TextSpan(
-                                text: ' on this network',
-                                style: AppFonts.body(
-                                  size: 13.5,
-                                  weight: FontWeight.w600,
-                                  color: AppColors.ink,
-                                  height: 1.2,
-                                ),
-                              ),
-                            ])),
+                            child: onlinePeers.isEmpty
+                                ? Text(
+                                    'no one nearby yet',
+                                    style: AppFonts.body(
+                                      size: 13.5,
+                                      weight: FontWeight.w600,
+                                      color: AppColors.ink2,
+                                      height: 1.2,
+                                    ),
+                                  )
+                                : Text.rich(TextSpan(children: [
+                                    TextSpan(
+                                      text: '${onlinePeers.length} nearby',
+                                      style: AppFonts.body(
+                                        size: 13.5,
+                                        weight: FontWeight.w700,
+                                        color: AppColors.accent,
+                                        height: 1.2,
+                                      ),
+                                    ),
+                                    TextSpan(
+                                      text: ' on this network',
+                                      style: AppFonts.body(
+                                        size: 13.5,
+                                        weight: FontWeight.w600,
+                                        color: AppColors.ink,
+                                        height: 1.2,
+                                      ),
+                                    ),
+                                  ])),
                           ),
                         ],
                       ),
