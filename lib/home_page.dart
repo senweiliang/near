@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -1113,8 +1114,87 @@ class _ConversationPageState extends State<_ConversationPage> {
     );
   }
 
+  /// super_clipboard 的 [DataReader.getFile] 是 callback 风格（不让 await 是为了
+  /// 不阻塞拖放 handle），这里包装成 Future 让 paste 流程能顺序读多个 format。
+  Future<Uint8List?> _readClipboardFile(
+      ClipboardDataReader item, FileFormat format) {
+    final completer = Completer<Uint8List?>();
+    final progress = item.getFile(
+      format,
+      (file) async {
+        try {
+          final bytes = await file.readAll();
+          if (!completer.isCompleted) completer.complete(bytes);
+        } catch (e) {
+          debugPrint('[paste] readAll threw: $e');
+          if (!completer.isCompleted) completer.complete(null);
+        }
+      },
+      onError: (e) {
+        debugPrint('[paste] getFile error: $e');
+        if (!completer.isCompleted) completer.complete(null);
+      },
+    );
+    if (progress == null && !completer.isCompleted) {
+      completer.complete(null);
+    }
+    return completer.future;
+  }
+
+  /// 剪贴板里有图片字节（macOS 截图 ⌘+Shift+4 / Preview ⌘+C / 浏览器 Copy
+  /// Image 都走这条），按 image 消息发送。返回 true 让 caller 跳过文本 fallback。
+  /// 优先级在 file URI 之后、文本之前 — file URI 也能产生 image bytes（双 format
+  /// 项），但用户复制文件时显然想发文件而不是图片。
+  Future<bool> _tryPasteImage() async {
+    final clipboard = SystemClipboard.instance;
+    if (clipboard == null) return false;
+    ClipboardReader reader;
+    try {
+      reader = await clipboard.read();
+    } catch (e) {
+      debugPrint('[paste] clipboard.read failed: $e');
+      return false;
+    }
+    for (final item in reader.items) {
+      Uint8List? bytes;
+      if (item.canProvide(Formats.png)) {
+        bytes = await _readClipboardFile(item, Formats.png);
+      }
+      if (bytes == null && item.canProvide(Formats.jpeg)) {
+        bytes = await _readClipboardFile(item, Formats.jpeg);
+      }
+      if (bytes == null) continue;
+      if (bytes.length > _maxImageBytes) {
+        _showPasteSnack(
+            'Image too large (${(bytes.length / 1024 / 1024).toStringAsFixed(1)} MB), max 10 MB');
+        return true;
+      }
+      if (!mounted) return true;
+      // 跟 _pickImage 同路径：先 prepareImage 立即建 bubble，后台 compress 再 completeImage
+      final raw = bytes;
+      final msg = widget.chat.prepareImage(
+        toId: widget.recipientId,
+        previewBytes: raw,
+        imageMime: 'image/jpeg',
+      );
+      _scrollToBottomAfterSend();
+      Uint8List compressed;
+      try {
+        compressed = await compute(_compressImageSync, raw);
+      } catch (e) {
+        debugPrint('[paste-image] compress failed: $e, sending original');
+        compressed = raw;
+      }
+      if (!mounted) return true;
+      widget.chat.completeImage(msg, compressed, imageMime: 'image/jpeg');
+      return true;
+    }
+    return false;
+  }
+
   Future<void> _handlePaste() async {
     if (await _tryPasteFiles()) return;
+    if (await _tryPasteImage()) return;
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text == null || text.isEmpty) return;
@@ -1942,6 +2022,7 @@ class _FullscreenImageState extends State<_FullscreenImage> {
       key: ValueKey('zoom-${m.id}'),
       onTap: () => Navigator.of(context).pop(),
       onZoomChanged: _setZoomed,
+      onSecondaryTap: (pos) => _showImageMenu(context, pos, bytes),
       child: content,
     );
   }
@@ -1976,7 +2057,7 @@ class _FullscreenImageState extends State<_FullscreenImage> {
           ),
           Positioned(
             right: 16,
-            bottom: 24,
+            bottom: 42, // 36px 按钮上移半个按钮高度（24 → 42），离 home indicator 远一点
             child: FadeTransition(
               opacity: bgFade,
               child: Material(
@@ -2005,11 +2086,13 @@ class _ZoomablePage extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;
   final ValueChanged<bool> onZoomChanged;
+  final void Function(Offset globalPosition)? onSecondaryTap;
   const _ZoomablePage({
     super.key,
     required this.child,
     required this.onTap,
     required this.onZoomChanged,
+    this.onSecondaryTap,
   });
 
   @override
@@ -2053,6 +2136,9 @@ class _ZoomablePageState extends State<_ZoomablePage> {
     return GestureDetector(
       onTap: widget.onTap,
       onDoubleTap: _handleDoubleTap,
+      onSecondaryTapUp: widget.onSecondaryTap == null
+          ? null
+          : (d) => widget.onSecondaryTap!(d.globalPosition),
       child: InteractiveViewer(
         transformationController: _controller,
         minScale: 1,
@@ -2937,7 +3023,7 @@ class _FileBubbleState extends State<_FileBubble> {
                   ),
                 if (isGroup)
                   Positioned(
-                    right: 6,
+                    right: -3,
                     top: 0,
                     bottom: 0,
                     child: Center(
@@ -3013,15 +3099,17 @@ class _ChevExpandButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      shape: const CircleBorder(),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: onTap,
-        child: SizedBox(
-          width: 26,
-          height: 26,
+    return SizedBox(
+      width: 44,
+      height: 44,
+      child: Material(
+        color: Colors.transparent,
+        child: InkResponse(
+          onTap: onTap,
+          radius: 18,
+          containedInkWell: true,
+          highlightShape: BoxShape.circle,
+          customBorder: const CircleBorder(),
           child: Center(
             child: AnimatedRotation(
               turns: expanded ? 0.5 : 0,

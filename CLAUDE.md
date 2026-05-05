@@ -310,4 +310,8 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 - **iOS 后台保活未做**：scope 收敛到 Android。要做需要 BGTaskScheduler 唤醒 + 重连 / VoIP push（后者得后端，违背 no-server 原则）
 - `super_clipboard` 在 Linux / Windows 桌面端尚未验证，目前只跑 macOS / iOS / Android
 - 设计稿目录 `../lan-chat-designs/` 是 HTML 原型，是 source of truth；改 UI 前先去看对应文件（`24-near.html` 主屏，`25-files.html` 文件交互，`27-fanout.html` 群聊文件 fanout 详情面板）
-- **进入对话时仍偶发"弹一下"**：现有的 `_initialSettled` 机制（`home_page.dart:835` Opacity gate + `_jumpToEnd` 用 post-frame callback 跳到底）在消息很多 / 长会话时仍然能看到一帧顶端位置然后跳底。原因：`_jumpToEnd` 在第一个 post-frame 跑完之后才触发，但首帧 layout 已经出来；Opacity 0 → 1 切换那一帧 ListView 还在算尺寸，可能 jump 不准。修法方向：换成 `reverse: true` 的 ListView（自然贴底）+ 反向 messages 顺序；或者用 `ScrollablePositionedList` 直接定位到 last index 不依赖跳像素
+- **进入对话"弹一下"问题（待修）**：`ListView.builder` 是 lazy build，第一个 post-frame 时 `maxScrollExtent` 只反映 viewport + cacheExtent 那一截 build 出的高度，单次 `jumpTo(maxScrollExtent)` 跳不到真正底部。`onChange` 后续 stickyBottom 二次 jumpTo 会让人看到"分段下弹"。
+  - **当前实现**（`home_page.dart` initState）：单次 `_jumpToEnd()` + Opacity gate，跟原作者的设计保持一致 — 简单但消息多时仍会"弹"。
+  - **试过的方案：循环 jumpTo 直到 maxScrollExtent 稳定（已撤）**。原本想在 Opacity 0 隐身期反复 jumpTo 直到一帧前后 max 不再增长才揭开，理论上能解决；实测有 bug — 暂时回撤了。具体 bug 表现待复现，可能跟 `_onChange` 的 stickyBottom 逻辑/软键盘 inset 调整产生竞争，或者跟 `Hero` flight 期间的 scroll position 干扰。
+  - **不能换 `reverse: true`** —— 单消息会贴 viewport 底部，违反"少消息时 top-anchored"的预期。
+  - **备选方案**：`scrollable_positioned_list` 包，用 `initialScrollIndex + initialAlignment: 1.0` 一次性 index-based 定位，不依赖跳像素，可以删掉 `_initialSettled` + Opacity gate。改动量 4-6 小时，但要替换 stickyBottom 检测（用 `ItemPositionsListener`）+ 软键盘适配 + Selection 兼容性测试。**触发点**：循环 jumpTo bug 排查清楚再修，或者直接换包。
