@@ -420,7 +420,7 @@ class _PeerListView extends StatelessWidget {
                         children: [
                           Text.rich(TextSpan(children: [
                             TextSpan(
-                              text: '$onlineCount nearby',
+                              text: '${onlinePeers.length} nearby',
                               style: AppFonts.body(
                                 size: 13.5,
                                 weight: FontWeight.w700,
