@@ -365,37 +365,25 @@ class _PeerListView extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text.rich(
-                            TextSpan(children: [
-                              TextSpan(
-                                text: chat.myName,
-                                style: AppFonts.body(
-                                  size: 18,
-                                  weight: FontWeight.w700,
-                                  color: AppColors.ink,
-                                  letterSpacing: -0.3,
-                                  height: 1.15,
-                                ),
-                              ),
-                              TextSpan(
-                                text: '  ${_shortHandle(chat.myId)}',
-                                style: AppFonts.mono(
-                                  size: 11,
-                                  color: AppColors.ink3,
-                                  letterSpacing: 0.18,
-                                ),
-                              ),
-                            ]),
+                          Text(
+                            chat.myName,
+                            style: AppFonts.body(
+                              size: 18,
+                              weight: FontWeight.w700,
+                              color: AppColors.ink,
+                              letterSpacing: -0.3,
+                              height: 1.15,
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          const SizedBox(height: 3),
+                          const SizedBox(height: 2),
                           Text(
-                            'link-local · peer-to-peer · no record',
+                            _shortHandle(chat.myId),
                             style: AppFonts.mono(
-                              size: 10.5,
+                              size: 11,
                               color: AppColors.ink3,
-                              letterSpacing: 0.08,
+                              letterSpacing: 0.18,
                             ),
                           ),
                         ],
@@ -406,51 +394,68 @@ class _PeerListView extends StatelessWidget {
               ),
             ),
 
-            // Room meta card
+            // Room meta card — body row + hairline divider + centered footer tagline
             Padding(
               padding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
               child: Container(
+                clipBehavior: Clip.antiAlias,
                 decoration: BoxDecoration(
                   color: AppColors.surface,
                   border: Border.all(color: AppColors.line),
                   borderRadius: BorderRadius.circular(14),
                 ),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                child: Row(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    _PresenceStack(tiles: [
-                      _MiniAv(text: _initial(chat.myName), you: true),
-                      for (final p in onlinePeers.take(4))
-                        _MiniAv(text: _initial(p.name)),
-                    ]),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                      child: Row(
                         children: [
-                          Text.rich(TextSpan(children: [
-                            TextSpan(
-                              text: '${onlinePeers.length} nearby',
-                              style: AppFonts.body(
-                                size: 13.5,
-                                weight: FontWeight.w700,
-                                color: AppColors.accent,
-                                height: 1.2,
+                          _PresenceStack(tiles: [
+                            _MiniAv(text: _initial(chat.myName), you: true),
+                            for (final p in onlinePeers.take(4))
+                              _MiniAv(text: _initial(p.name)),
+                          ]),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text.rich(TextSpan(children: [
+                              TextSpan(
+                                text: '${onlinePeers.length} nearby',
+                                style: AppFonts.body(
+                                  size: 13.5,
+                                  weight: FontWeight.w700,
+                                  color: AppColors.accent,
+                                  height: 1.2,
+                                ),
                               ),
-                            ),
-                            TextSpan(
-                              text: ' on this network',
-                              style: AppFonts.body(
-                                size: 13.5,
-                                weight: FontWeight.w600,
-                                color: AppColors.ink,
-                                height: 1.2,
+                              TextSpan(
+                                text: ' on this network',
+                                style: AppFonts.body(
+                                  size: 13.5,
+                                  weight: FontWeight.w600,
+                                  color: AppColors.ink,
+                                  height: 1.2,
+                                ),
                               ),
-                            ),
-                          ])),
+                            ])),
+                          ),
                         ],
+                      ),
+                    ),
+                    const Divider(
+                        height: 1, thickness: 1, color: AppColors.line),
+                    Padding(
+                      padding:
+                          const EdgeInsets.fromLTRB(14, 8, 14, 10),
+                      child: Center(
+                        child: Text(
+                          'link-local · peer-to-peer · no record',
+                          style: AppFonts.mono(
+                            size: 10.5,
+                            color: AppColors.ink3,
+                            letterSpacing: 0.08,
+                          ),
+                        ),
                       ),
                     ),
                   ],
