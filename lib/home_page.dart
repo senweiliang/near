@@ -415,6 +415,11 @@ class _PeerListView extends StatelessWidget {
                             _MiniAv(text: _initial(chat.myName), you: true),
                             for (final p in onlinePeers.take(4))
                               _MiniAv(text: _initial(p.name)),
+                            if (onlinePeers.length > 4)
+                              _MiniAv(
+                                text: '+${onlinePeers.length - 4}',
+                                overflow: true,
+                              ),
                           ]),
                           const SizedBox(width: 12),
                           Expanded(
@@ -564,28 +569,48 @@ class _PresenceStack extends StatelessWidget {
 class _MiniAv extends StatelessWidget {
   final String text;
   final bool you;
-  const _MiniAv({required this.text, this.you = false});
+  final bool overflow;
+  const _MiniAv({required this.text, this.you = false, this.overflow = false});
 
   @override
   Widget build(BuildContext context) {
+    final bg = overflow
+        ? AppColors.bgApp
+        : (you ? AppColors.accent : AppColors.surface2);
+    final fg = overflow
+        ? AppColors.ink3
+        : (you ? Colors.white : AppColors.ink2);
     return Container(
       width: 22,
       height: 22,
       decoration: BoxDecoration(
-        color: you ? AppColors.accent : AppColors.surface2,
+        color: bg,
         shape: BoxShape.circle,
-        border: Border.all(color: AppColors.bgApp, width: 2),
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        text,
-        style: AppFonts.body(
-          size: 9.5,
-          weight: FontWeight.w600,
-          color: you ? Colors.white : AppColors.ink2,
-          height: 1,
+        border: Border.all(
+          color: overflow ? AppColors.line : AppColors.bgApp,
+          width: overflow ? 1 : 2,
         ),
       ),
+      alignment: Alignment.center,
+      child: overflow
+          ? Text(
+              text,
+              style: AppFonts.mono(
+                size: 9,
+                color: fg,
+                height: 1,
+                letterSpacing: 0,
+              ),
+            )
+          : Text(
+              text,
+              style: AppFonts.body(
+                size: 9.5,
+                weight: FontWeight.w600,
+                color: fg,
+                height: 1,
+              ),
+            ),
     );
   }
 }
