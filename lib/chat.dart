@@ -30,14 +30,17 @@ class Chat extends ChangeNotifier {
   final Map<String, String> _svcNameToPeerId = {};
 
   bool autoAcceptFiles = true;
+  bool stayConnectedInBackground = false;
 
   late final Transport _transport;
   late final Discovery _discovery;
   Directory? _fileCacheDir;
 
   static const String _kAutoAcceptFiles = 'autoAcceptFiles';
+  static const String _kStayConnected = 'stayConnectedInBackground';
   static const Duration _ackTimeout = Duration(milliseconds: 500);
   static const MethodChannel _platform = MethodChannel('near/files');
+  static const MethodChannel _bgPlatform = MethodChannel('near/background');
 
   Future<void> start(String displayName) async {
     final testId = Platform.environment['NEAR_TEST_ID'];
@@ -61,6 +64,7 @@ class Chat extends ChangeNotifier {
       }
       myId = stored;
       autoAcceptFiles = prefs.getBool(_kAutoAcceptFiles) ?? true;
+      stayConnectedInBackground = prefs.getBool(_kStayConnected) ?? false;
     }
     final base = await getApplicationDocumentsDirectory();
     final cacheSuffix = isTestMode ? '_$testId' : '';
@@ -87,6 +91,43 @@ class Chat extends ChangeNotifier {
       onPeerFound: _onPeerFound,
       onPeerLost: _onPeerLost,
     );
+    if (stayConnectedInBackground) {
+      await _ensureBackgroundService();
+    }
+  }
+
+  Future<void> setStayConnectedInBackground(bool v) async {
+    if (stayConnectedInBackground == v) return;
+    stayConnectedInBackground = v;
+    final isTestMode = (Platform.environment['NEAR_TEST_ID'] ?? '').isNotEmpty;
+    if (!isTestMode) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kStayConnected, v);
+    }
+    if (v) {
+      await _ensureBackgroundService();
+    } else {
+      await _stopBackgroundService();
+    }
+    notifyListeners();
+  }
+
+  Future<void> _ensureBackgroundService() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _bgPlatform.invokeMethod<void>('start');
+    } catch (e) {
+      debugPrint('[chat] foreground service start failed: $e');
+    }
+  }
+
+  Future<void> _stopBackgroundService() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _bgPlatform.invokeMethod<void>('stop');
+    } catch (e) {
+      debugPrint('[chat] foreground service stop failed: $e');
+    }
   }
 
   Future<void> setAutoAcceptFiles(bool v) async {

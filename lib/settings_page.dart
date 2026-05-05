@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -210,6 +212,18 @@ class _SettingsPageState extends State<SettingsPage> {
               value: widget.chat.autoAcceptFiles,
               onChanged: (v) => widget.chat.setAutoAcceptFiles(v),
             ),
+            if (Platform.isAndroid) ...[
+              const _RowDivider(),
+              _ToggleRow(
+                label: 'Stay connected in background',
+                sub: widget.chat.stayConnectedInBackground
+                    ? 'Notification keeps Near reachable when screen is off'
+                    : 'Android may drop the connection within seconds of locking',
+                value: widget.chat.stayConnectedInBackground,
+                onChanged: (v) =>
+                    widget.chat.setStayConnectedInBackground(v),
+              ),
+            ],
           ]),
           const SizedBox(height: 18),
           _Section(title: 'Diagnostics', children: [
