@@ -28,11 +28,11 @@
 | `main.dart` | App entrypoint。劫持 `debugPrint` 把 `[xxx]` 前缀日志注入 `AppLog`；macOS 用 `MethodChannel('near.window/ready')` 通知原生窗口就绪 |
 | `theme.dart` | `AppColors` 调色板 + `AppFonts.body()` / `AppFonts.mono()` 工厂 |
 | `discovery.dart` | mDNS 广播 + 监听。服务类型 `_near._tcp`，attributes 携带 `id` / `name`。`updateName()` 通过 stop+start 重新广播触发对端刷新 |
-| `transport.dart` | WebSocket 连接管理。dual-stack server、IPv4 lookup、ID 去重、keepalive、redial、文件分块传输 |
+| `transport.dart` | WebSocket 连接管理。dual-stack server、IPv4 lookup、ID 去重、keepalive、redial、文件分块传输；通过 `onChannelEstablished` / `onChannelClosed` 回调把 channel 状态喂给 chat |
 | `peer.dart` | `Peer` 模型（id/name/host/port + `online` flag + `lastActiveAt` 用于 LRU 排序）+ `ChatMessage` 模型（含 `SendStatus`、图片 base64 缓存、文件元信息、`bytesTransferred`、offer 三态 flag、`fanout` per-peer 状态表）+ `FanoutState` / `FanoutEntry`（仅 sender 端用，不进 wire format） |
-| `chat.dart` | `Chat extends ChangeNotifier`：粘合 discovery + transport，维护 `messages` / `peers` / ack timer / 文件接收 sink；Android 通过 `MethodChannel('near/files')` 走 MediaStore |
-| `home_page.dart` | 单文件大屏：Splash / NamePrompt / PeerList / Conversation 全在这里。约 2400 行，是后续优化的主战场 |
-| `settings_page.dart` | 改昵称 + 查看调试日志 |
+| `chat.dart` | `Chat extends ChangeNotifier`：粘合 discovery + transport，维护 `messages` / `peers` / ack timer / 文件接收 sink；Android 通过 `MethodChannel('near/files')` 走 MediaStore；通过 `MethodChannel('near/background')` 启停 Android foreground service |
+| `home_page.dart` | 单文件大屏：Splash / NamePrompt / PeerList / Conversation 全在这里。约 2500 行，是后续优化的主战场 |
+| `settings_page.dart` | 改昵称、auto-accept 文件 toggle、Stay-connected-in-background toggle（仅 Android）、查看调试日志 |
 | `log.dart` | 内存环形缓冲，给 settings 页展示 |
 
 ---
@@ -59,11 +59,23 @@ mDNS 解析出的主机名（`xxx.local.`）在某些网络下会优先解析到
 - App 从后台 resume：`Chat.onAppResumed()` 对所有 connected peer 发 1s 超时的 probe ping，挂的丢弃 + redial。这是修过的实战 bug —— iOS 切后台几秒回来 socket 已经死了但没收到 close frame
 - `_keepAliveInterval = 10s` 定在 `transport.dart:26`
 
-### mDNS lost 抖动
-改名重广播会触发对端 `lost` 事件。`chat.dart` 里加了护栏：channel 还活着就忽略 lost，避免 peer 列表抖一下消失再出现。
+### mDNS lost 抖动 + bonsoir_android attrs 错位
+两个独立坑加在一起处理：
+
+1. **改名重广播会触发对端 `lost` 事件**。`chat._onPeerLost` 加了护栏：`_transport.hasChannelTo(id)` 为 true 就忽略 lost，避免 peer 列表抖一下消失再出现
+2. **bonsoir_android 5.x 的 lost 事件 attrs 不可靠** —— `svc.attributes` 拿到的是**本机自己的广播 attrs**（`name=Android, id=本机的id`），不是丢失的那个 peer 的 attrs。如果按 `svc.attributes['id']` 查 peer，永远查的是本机自己（不在 peers 里），导致 lost 路径变 no-op、peer.online 永远停在 true
+3. 修法：`_onPeerFound` 时维护 `_svcNameToPeerId[svc.name] = id` 映射，`_onPeerLost` 优先按 `svc.name` 反查真实 peerId（fallback 到 attrs['id'] 兼容 bonsoir_darwin / bonsoir_windows）
+
+### Peer 在线状态：transport channel 是 source of truth
+mDNS 在 Android 后台、网络抖动场景下不可靠。所以 `peer.online` 的权威信号改成**transport channel 状态**：
+- `_onChannelEstablished(peerId)` → `peer.online = true`
+- `_onChannelClosed(peerId)` → `peer.online = false`
+- mDNS lost 仍保留作为辅助兜底（peer 关掉 app 但 channel 没及时收 close frame 的情况）
+
+之前只靠 mDNS 标 offline 时，Android log 显示对端 `channel done 1002` 但 peer 还是绿点 —— 因为 mDNS lost 要么没来，要么 attrs 错位。
 
 ### Peer 生命周期 / LRU 排序
-Peer 下线（mDNS lost 且 channel 也已断）**不从 `peers` map 删除**，仅把 `peer.online = false`。这样：
+Peer 下线（channel 关闭，或 mDNS lost 且 channel 也已断）**不从 `peers` map 删除**，仅把 `peer.online = false`。这样：
 - 用户依然能进入该 peer 的 conversation 看历史聊天记录
 - UI 把 presence dot 从绿色 (`AppColors.presence`) 切到灰色 (`AppColors.inkFaint`)
 - conversation header sub-line 显示 `@xxxx · offline` 替代 IP
@@ -78,7 +90,7 @@ PeerList 排序两层：
 
 `_bumpPeerActivity(peerId)` 在 4 个收发入口（`_onIncoming` / `_onFileOffer` / `send` / `prepareImage` / `sendFile`）调用。peerId == null 表示群发，遍历所有 connected peer 一起 bump（群发对所有人算一次互动）。
 
-主屏 PeerList 的 `N nearby` 数字只算 online peer（自己 + online peers）；CONVERSATIONS section header 右侧在有人 offline 时显示 `online / total` 比值，全员 online 时只显示总数。
+主屏 hero 区 `N nearby on this network` 数字 **只算 peer，不含自己**（"nearby" 字面就不该把自己算进去）。CONVERSATIONS section header 右侧的 `online / total` 比值则是 conversation 数（peers + Everyone group），含 +1 是 Everyone group，不是自己。
 
 PeerList tile 的 meta 行通过顶层 `_peerPreview(chat, peer)` 计算最近消息预览（peer == null 表示 Everyone here），从 `chat.messages` 尾向头扫一次找到第一条匹配。每次 `Chat.notifyListeners` 时整个 PeerList 重 build 重新扫，O(N×M) 但 messages 不持久化、量小，没必要建索引。
 
@@ -103,6 +115,16 @@ PeerList tile 的 meta 行通过顶层 `_peerPreview(chat, peer)` 计算最近�
 文件 ACK 不走 `_ackTimers`，由 `sendFileBytes` 的 onComplete/onError 回调直接改 status —— 文件可能传几分钟，不能用 500ms 文本 ACK 超时来判。
 
 发送方在等待 accept 期间通过 `_outgoingFiles[msgId]` 持有 `File` 对象引用，accept 来到时再打开读取。如果文件已被外部删除，`file.open()` 抛错走 onError 标 failed。
+
+### Android 后台保活：foreground service（opt-in）
+Android 系统在 app `paused` 后约 5 秒就会切断 wifi socket，导致 channel 死掉、对端 send 没人收。"允许后台运行"（电池白名单）只防止进程被杀，**不**保证网络。要真后台收消息，唯一合法解就是 foreground service + 常驻通知。
+
+实现：
+- `NearForegroundService.kt`（`android/app/src/main/kotlin/com/near/app/`）：`startForeground` 挂一个 IMPORTANCE_MIN 的静默通知 "Near · Connected on this network"，OS 不再 throttle 网络
+- `MainActivity.kt` 暴露 `MethodChannel('near/background')`，方法 `start` / `stop`；`start` 还会做 Android 13+ 的 POST_NOTIFICATIONS 运行时权限请求
+- `chat.dart` `stayConnectedInBackground` 字段持久化在 SharedPreferences key `stayConnectedInBackground`，**默认 false**；`Chat.start()` 时若 toggle 开着，自动调 `_ensureBackgroundService()`
+- Settings → Receiving 提供 toggle，仅 Android 显示；toggle 开关动作直接走 `chat.setStayConnectedInBackground()` → MethodChannel
+- iOS 没做（iOS 后台 socket 限制不一样，要做需要 BGTaskScheduler / VoIP push，scope 收敛只做 Android）
 
 ### Android 文件落地
 不能写 `getApplicationDocumentsDirectory`（用户看不到），必须走 MediaStore。`chat.dart` 里 `_androidChain[msgId]` 是个 `Future<void>` 链，把 `appendChunk` 串行化，否则原生侧 fd 写入会乱序。`finishIncoming` 收到 `file_end` 时被调用拿到最终 content URI。
@@ -151,24 +173,28 @@ iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/near_files/{msgId}
 - 等宽 / handle / 元数据 / 系统提示：**JetBrains Mono**（设计稿用 Geist Mono，工程上用 JetBrains Mono 替代）
 
 ### 屏幕结构
-1. **Splash**：3 秒最低展示 + 450ms 淡出（`home_page.dart:_bootstrap`）
-2. **NamePrompt**：首次启动输入昵称
+1. **Splash**：2 秒最低展示。**首次启动**走 hero 动画 → NamePrompt：splash 中央的 `Near.` 用 GlobalKey 测量 NamePrompt 里 `Near.` 的目标 rect，然后用 `AnimationController`(700ms easeInOutCubic) 把字号从 44pt 平滑插值到 36pt + 平移到目标位置；splash 白底同时用 `Interval(0, 0.7) easeIn` 淡出；NamePrompt 的 `a quiet room on this network` 副标 + 输入框 + Enter 按钮通过 `Interval(0.35, 1.0)` `FadeTransition` + `SlideTransition(0,0.12 → 0)` 一起淡入。**回访用户**（已存 myName）走原 450ms 淡出路径，不进 hero
+   - **键盘焦点延迟**：NamePrompt 的 TextField 不用 `autofocus`，绑定 `FocusNode`，监听 `entryAnim` status；hero 完成（`AnimationStatus.completed`）后才 `requestFocus`。否则键盘弹出会改变 layout，target rect 失效，NEAR. 跳一下
+   - **Material 上下文**：splash overlay 必须包 `Material(type: transparency)`，否则 Text 拿不到 `DefaultTextStyle`，会用 fallback debug 字体（带黄色双下划线 + 字形基线偏移），swap 时 NEAR. 视觉跳几像素
+2. **NamePrompt**：首次启动输入昵称；输入提交 → `chat.start(name)` 内会把 myName 写入 SharedPreferences，下次直接进 PeerList
 3. **PeerList（主屏）**
-   - Hero header：自己头像 + 昵称（18px/700/-0.3 letter-spacing）+ `@xxxx` short handle（mono 11px）；整块点击进 Settings
-   - Room meta 卡：4 张堆叠 mini avatar（**仅 online peer**）+ "N nearby in this room" + mono 副标
+   - **Hero header**：自己头像 (42px) + 昵称 (18px/700/-0.3 letter-spacing) + `@xxxx` short handle (mono 11px) + **第三行 mono 副标 `link-local · peer-to-peer · no record`** (mono 10.5px)；整块点击进 Settings。features tagline 从 meta 卡上移到这里 —— 跟 user identity 同列「stable info」，meta 卡不再有 wrap 风险
+   - **Room meta 卡**：5 张堆叠 mini avatar（自己 + 4 个 online peer）+ "**N nearby on this network**"（N **不含自己**，纯 peers 数）；不再带 mono 副标
    - SECTION header：mono 11px / 0.66 letter-spacing 大写；右侧显示 `online / total` 比值（全员 online 时仅显示总数）
    - Peer 列表：群聊 `Everyone here` 置顶，下面是 peer 条目（unread badge）
      - **LRU 排序**：聊过的浮在前（按 `lastActiveAt` 倒序），没聊过的按发现顺序排在后
      - **meta 行 = 最近消息预览**（IM 会话列表风格，不再显示 hostname）：
        - 私聊：双向都只显示 body，不加 sender 前缀（avatar + title 已经表明是谁）
        - `Everyone here`：对方发的加 `{fromName}: ` 区分谁说的；自己发的不加前缀
-       - 文件 → `fileName`；图片 → `Photo`；文本 → 多行折叠成单行（`\s+ → ' '`）
-       - 没匹配消息时 fallback：peer → host name（mDNS hostname）/ `offline`；group → `N in the room · open to all`
+       - 文件 → `[fileName]`；图片 → `[Image]`；文本 → 多行折叠成单行（`\s+ → ' '`）。附件类用 `[...]` 跟正文文本视觉区分
+       - 没匹配消息时 fallback：peer → host name（mDNS hostname）/ `offline`；group → `N in the room · open to all`（"in the room" 在群聊语境下指代"聊天室"，是字面所指，保留）
      - **Offline peer 不删除**：保留在列表中，presence 点变灰（`AppColors.inkFaint`），meta 在没消息记录时显示 `offline`
 4. **ConversationPage**：自定义 `_FastCupertinoRoute`（300ms in / 260ms out），分日期分隔（Today / Yesterday / M/D HH:MM），消息泡 + 状态 dot + 图片/文件附件。桌面端输入框支持 ⌘+V / Ctrl+V 直接粘贴文件发送（见技术决策"输入框直接粘贴文件"）
-   - 顶部 av-bar 也带 presence dot，sub-line 在线显示 `@xxxx · {hostname}.local.`（mDNS hostname，来自 bonsoir 的 `svc.host`，不是 IP；IP 解析在 `transport.connectTo` 内仅用于 socket 拨号），离线显示 `@xxxx · offline`
+   - 顶部 av-bar 也带 presence dot，sub-line 在线显示 `@xxxx · {hostname}.local.`（mDNS hostname，来自 bonsoir 的 `svc.host`，不是 IP；IP 解析在 `transport.connectTo` 内仅用于 socket 拨号），离线显示 `@xxxx · offline`；group sub 用 `N in the room · open to all`
    - Compose bar 行 `crossAxisAlignment: center`，所有按钮（image / file picker / send）统一 44×44，跟 textfield `minHeight: 44` 在中线对齐
-5. **Settings**：改名 + 日志
+   - **首帧防 scroll-flash**：消息列表用 `Opacity(_initialSettled ? 1 : 0)` 包住；`initState` post-frame callback 跑 `_jumpToEnd()` 后再 `setState(_initialSettled = true)` 揭开。否则 route 滑入时用户看到 list 在顶部位置一瞬，紧接着跳到底部，视觉"从远处滑下来"
+   - **文本气泡 context menu**：text bubble 上 `onSecondaryTapUp`（桌面右键）+ `onLongPressStart`（移动长按）触发 `_showMessageMenu` —— `showMenu` 弹一个白底 1px 描边 10px 圆角的菜单，目前只有一项 `Copy`，复制完弹 1.2s `Copied` SnackBar
+5. **Settings**：改名、auto-accept files、Stay connected in background（仅 Android）、日志
 
 ### 视觉细节
 - 卡片圆角统一 `12` / `14`，1px 细描边 + 浅灰 surface（不用阴影）
@@ -241,8 +267,10 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
   - `Info.plist` 里 `NSBonjourServices` 要包含 `_near._tcp`
   - 图片保存：sandbox 不能默认写 `~/Downloads`，需要 entitlement `com.apple.security.files.downloads.read-write`。开了之后用 `path_provider.getDownloadsDirectory()` 拿到真实 `~/Downloads` 直接写文件，不用弹 saveFile 对话框（mac 桌面用户更习惯 Finder 路径而非 Photos.app）
   - `NSPhotoLibraryAddUsageDescription` 仍然保留，便于 iOS / Android fallback 路径
-- **Android**：`MethodChannel('near/files')` 实现 `beginIncoming` / `appendChunk` / `finishIncoming`，落地到 MediaStore Downloads
-- **iOS**：Local Network 权限 + Bonjour services 声明在 `Info.plist`
+- **Android**：
+  - `MethodChannel('near/files')` 实现 `beginIncoming` / `appendChunk` / `finishIncoming`，落地到 MediaStore Downloads
+  - `MethodChannel('near/background')` 启停 `NearForegroundService`（见三 · Android 后台保活）；`AndroidManifest.xml` 声明 `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_DATA_SYNC` / `POST_NOTIFICATIONS` / `WAKE_LOCK` 权限，service `foregroundServiceType="dataSync"`
+- **iOS**：Local Network 权限 + Bonjour services 声明在 `Info.plist`；后台保活未做
 
 ### 图片保存路径分支（`home_page.dart:_save`）
 | 平台 | 路径 |
@@ -262,5 +290,7 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 - ACK 超时 500ms 在跨子网或慢 Wi-Fi 上偏短，但加大会让"对方掉线"的反馈延迟。可考虑随网络质量自适应
 - **群聊 fanout 按"快照"，不跟随 peer 进出**：`sendFile` 时刻的 `connectedPeerIds` 决定 fanout 表，之后即使有新 peer 加入也收不到这条 offer，已断开的 peer 不会从 fanout 移除（永远停在 `offered`，导致 `_maybeFinalizeFanout` 永远不收敛）。修法：`_onPeerLost` 时遍历 `_outgoingFiles` 把对应 entry 标 `declined`，触发 finalize
 - **测试设备**：同机跑两个 sandboxed mac 实例不能真实模拟（共享 container + 同 bundleId mDNS 行为异常 + loopback sandbox 限制）。需要至少两台物理设备；测 `K of N` 群聊聚合需要 ≥ 3 端
+- **多实例本地测试**：通过 `NEAR_TEST_ID=alice ./build/macos/Build/Products/Release/near.app/Contents/MacOS/near &` 启动独立实例（不读 SharedPreferences、用独立 myId / 独立 `near_files_$testId` 文件缓存目录、强制 autoAcceptFiles=true）。同机两实例之间 dial loopback 时 dedupe 风暴有真 bug —— alice/bob 同机互联会出 `dedupe close` 死循环，偶发 SIGSEGV，跨机正常
+- **iOS 后台保活未做**：scope 收敛到 Android。要做需要 BGTaskScheduler 唤醒 + 重连 / VoIP push（后者得后端，违背 no-server 原则）
 - `super_clipboard` 在 Linux / Windows 桌面端尚未验证，目前只跑 macOS / iOS / Android
 - 设计稿目录 `../lan-chat-designs/` 是 HTML 原型，是 source of truth；改 UI 前先去看对应文件（`24-near.html` 主屏，`25-files.html` 文件交互）
