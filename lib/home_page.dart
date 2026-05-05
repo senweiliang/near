@@ -365,28 +365,31 @@ class _PeerListView extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            chat.myName,
-                            style: AppFonts.body(
-                              size: 18,
-                              weight: FontWeight.w700,
-                              color: AppColors.ink,
-                              letterSpacing: -0.3,
-                              height: 1.15,
-                            ),
+                          Text.rich(
+                            TextSpan(children: [
+                              TextSpan(
+                                text: chat.myName,
+                                style: AppFonts.body(
+                                  size: 18,
+                                  weight: FontWeight.w700,
+                                  color: AppColors.ink,
+                                  letterSpacing: -0.3,
+                                  height: 1.15,
+                                ),
+                              ),
+                              TextSpan(
+                                text: '  ${_shortHandle(chat.myId)}',
+                                style: AppFonts.mono(
+                                  size: 11,
+                                  color: AppColors.ink3,
+                                  letterSpacing: 0.18,
+                                ),
+                              ),
+                            ]),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            _shortHandle(chat.myId),
-                            style: AppFonts.mono(
-                              size: 11,
-                              color: AppColors.ink3,
-                              letterSpacing: 0.18,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 3),
                           Text(
                             'link-local · peer-to-peer · no record',
                             style: AppFonts.mono(
