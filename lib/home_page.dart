@@ -386,6 +386,15 @@ class _PeerListView extends StatelessWidget {
                               letterSpacing: 0.18,
                             ),
                           ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'link-local · peer-to-peer · no record',
+                            style: AppFonts.mono(
+                              size: 10.5,
+                              color: AppColors.ink3,
+                              letterSpacing: 0.08,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -438,15 +447,6 @@ class _PeerListView extends StatelessWidget {
                               ),
                             ),
                           ])),
-                          const SizedBox(height: 1),
-                          Text(
-                            'link-local · peer-to-peer · no record',
-                            style: AppFonts.mono(
-                              size: 11,
-                              color: AppColors.ink3,
-                              letterSpacing: 0.1,
-                            ),
-                          ),
                         ],
                       ),
                     ),
