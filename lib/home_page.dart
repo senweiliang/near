@@ -833,6 +833,7 @@ class _ConversationPageState extends State<_ConversationPage> {
   final _scroll = ScrollController();
 
   bool _initialSettled = false;
+  double _lastBottomInset = 0;
 
   @override
   void initState() {
@@ -856,6 +857,22 @@ class _ConversationPageState extends State<_ConversationPage> {
     _inputFocus.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final inset = MediaQuery.viewInsetsOf(context).bottom;
+    if (inset == _lastBottomInset) return;
+    final delta = inset - _lastBottomInset;
+    _lastBottomInset = inset;
+    if (delta <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final target = (_scroll.position.pixels + delta)
+          .clamp(0.0, _scroll.position.maxScrollExtent);
+      _scroll.jumpTo(target);
+    });
   }
 
   void _onChange() {
@@ -1235,6 +1252,7 @@ class _ConversationPageState extends State<_ConversationPage> {
                             name: m.fromName,
                             handle: _shortHandle(m.fromId),
                             mine: mine,
+                            chat: chat,
                             hideAuthor: hideAuthor,
                             imageBytes: imgBytes,
                             imageHeroTag:
@@ -1373,11 +1391,88 @@ Future<void> _showMessageMenu(
   }
 }
 
+Future<void> _showImageMenu(
+  BuildContext context,
+  Offset globalPosition,
+  Uint8List bytes,
+) async {
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final selected = await showMenu<String>(
+    context: context,
+    color: AppColors.bgApp,
+    surfaceTintColor: Colors.transparent,
+    elevation: 6,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(10),
+      side: const BorderSide(color: AppColors.line, width: 1),
+    ),
+    position: RelativeRect.fromRect(
+      Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+      Offset.zero & overlay.size,
+    ),
+    items: [
+      PopupMenuItem<String>(
+        value: 'copy',
+        height: 36,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.content_copy, size: 14, color: AppColors.ink2),
+            const SizedBox(width: 10),
+            Text(
+              'Copy',
+              style: AppFonts.body(size: 13, color: AppColors.ink),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+  if (selected != 'copy') return;
+  final clipboard = SystemClipboard.instance;
+  if (clipboard == null) return;
+  final isPng = bytes.length >= 4 &&
+      bytes[0] == 0x89 &&
+      bytes[1] == 0x50 &&
+      bytes[2] == 0x4E &&
+      bytes[3] == 0x47;
+  final item = DataWriterItem();
+  item.add(isPng ? Formats.png(bytes) : Formats.jpeg(bytes));
+  try {
+    await clipboard.write([item]);
+  } catch (e) {
+    debugPrint('[image-copy] write failed: $e');
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text(
+          'Copy failed',
+          style: AppFonts.body(size: 13, color: Colors.white),
+        ),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(milliseconds: 1200),
+      ),
+    );
+    return;
+  }
+  messenger?.showSnackBar(
+    SnackBar(
+      content: Text(
+        'Copied',
+        style: AppFonts.body(size: 13, color: Colors.white),
+      ),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(milliseconds: 1200),
+    ),
+  );
+}
+
 class _MessageBubble extends StatelessWidget {
   final String text;
   final String name;
   final String handle;
   final bool mine;
+  final Chat chat;
   final bool hideAuthor;
   final Uint8List? imageBytes;
   final String? imageHeroTag;
@@ -1395,6 +1490,7 @@ class _MessageBubble extends StatelessWidget {
     required this.name,
     required this.handle,
     required this.mine,
+    required this.chat,
     this.hideAuthor = false,
     this.imageBytes,
     this.imageHeroTag,
@@ -1541,45 +1637,65 @@ class _MessageBubble extends StatelessWidget {
                         child: _FileBubble(
                           msg: fileMessage!,
                           mine: mine,
+                          chat: chat,
                           onAccept: onFileAccept,
                           onDecline: onFileDecline,
                         ),
                       ),
                     if (hasText)
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onSecondaryTapUp: (d) =>
-                            _showMessageMenu(context, d.globalPosition, text),
-                        onLongPressStart: (d) =>
-                            _showMessageMenu(context, d.globalPosition, text),
-                        child: Theme(
-                          data: Theme.of(context).copyWith(
-                            textSelectionTheme: TextSelectionThemeData(
-                              selectionColor: mine
-                                  ? Colors.white.withValues(alpha: 0.35)
-                                  : AppColors.accent.withValues(alpha: 0.28),
+                      Builder(builder: (context) {
+                        final textStyle = AppFonts.body(
+                          size: 15,
+                          color: textColor,
+                          height: 1.5,
+                        );
+                        final linkStyle = textStyle.copyWith(
+                          decoration: TextDecoration.underline,
+                          decorationColor: textColor,
+                        );
+                        final themed = Theme.of(context).copyWith(
+                          textSelectionTheme: TextSelectionThemeData(
+                            selectionColor: mine
+                                ? Colors.white.withValues(alpha: 0.35)
+                                : AppColors.accent.withValues(alpha: 0.28),
+                          ),
+                        );
+                        if (Platform.isAndroid) {
+                          return Theme(
+                            data: themed,
+                            child: SelectableLinkify(
+                              text: text,
+                              onOpen: _openLink,
+                              options: const LinkifyOptions(humanize: false),
+                              style: textStyle,
+                              linkStyle: linkStyle,
+                              contextMenuBuilder: (context, editableState) {
+                                return AdaptiveTextSelectionToolbar
+                                    .editableText(
+                                  editableTextState: editableState,
+                                );
+                              },
+                            ),
+                          );
+                        }
+                        return GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onSecondaryTapUp: (d) => _showMessageMenu(
+                              context, d.globalPosition, text),
+                          onLongPressStart: (d) => _showMessageMenu(
+                              context, d.globalPosition, text),
+                          child: Theme(
+                            data: themed,
+                            child: Linkify(
+                              text: text,
+                              onOpen: _openLink,
+                              options: const LinkifyOptions(humanize: false),
+                              style: textStyle,
+                              linkStyle: linkStyle,
                             ),
                           ),
-                          child: Linkify(
-                            text: text,
-                            onOpen: _openLink,
-                            options: const LinkifyOptions(humanize: false),
-                            style: AppFonts.body(
-                              size: 15,
-                              color: textColor,
-                              height: 1.5,
-                            ),
-                            linkStyle: AppFonts.body(
-                              size: 15,
-                              color: textColor,
-                              height: 1.5,
-                            ).copyWith(
-                              decoration: TextDecoration.underline,
-                              decorationColor: textColor,
-                            ),
-                          ),
-                        ),
-                      ),
+                        );
+                      }),
                   ],
                 ),
               ),
@@ -1639,6 +1755,8 @@ class _BubbleImage extends StatelessWidget {
       padding: EdgeInsets.only(bottom: marginBottom),
       child: GestureDetector(
         onTap: () => _openFullscreen(context),
+        onSecondaryTapUp: (d) =>
+            _showImageMenu(context, d.globalPosition, bytes),
         child: image,
       ),
     );
@@ -2443,20 +2561,34 @@ String _formatFileSize(int bytes) {
   return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
 }
 
-class _FileBubble extends StatelessWidget {
+class _FileBubble extends StatefulWidget {
   final ChatMessage msg;
   final bool mine;
+  final Chat chat;
   final VoidCallback? onAccept;
   final VoidCallback? onDecline;
   const _FileBubble({
     required this.msg,
     required this.mine,
+    required this.chat,
     this.onAccept,
     this.onDecline,
   });
 
   @override
+  State<_FileBubble> createState() => _FileBubbleState();
+}
+
+class _FileBubbleState extends State<_FileBubble> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
+    final msg = widget.msg;
+    final mine = widget.mine;
+    final onAccept = widget.onAccept;
+    final onDecline = widget.onDecline;
+
     final size = msg.fileSize ?? 0;
     final transferred = msg.bytesTransferred;
     final ready = msg.fileReady;
@@ -2468,14 +2600,24 @@ class _FileBubble extends StatelessWidget {
     final deliveredCount = msg.fanout.values
         .where((e) => e.state == FanoutState.delivered)
         .length;
+    // 群聊 fanout 全部进入终态（每个 entry 都是 delivered/declined/failed）— 用于
+    // 隐藏副标脉冲点（活跃 vs 已结束）。bubble 颜色不再因终态 dim，K=0 终态也维持
+    // 原色，由展开 detail 行说明每个 acceptor 的 declined/failed。
+    final isFanoutTerminal = isGroup &&
+        msg.fanout.values.every((e) =>
+            e.state == FanoutState.delivered ||
+            e.state == FanoutState.declined ||
+            e.state == FanoutState.failed);
     final isFailed = mine && msg.status == SendStatus.failed && !isDeclined;
     final isPending = msg.status == SendStatus.pending;
-    // No progress bar while still negotiating (offer pending / awaiting accept).
+    // 群聊不显示底部 progress bar（按 27-fanout.html 注释 01）— 由展开 detail 列表
+    // 里的 per-peer mini bar 承担。私聊 / receiver 维持原行为。
     final showProgress = isPending &&
         !ready &&
         size > 0 &&
         !awaitingAccept &&
-        !offerPending;
+        !offerPending &&
+        !isGroup;
     final progress =
         size > 0 ? (transferred / size).clamp(0.0, 1.0) : 0.0;
 
@@ -2520,16 +2662,15 @@ class _FileBubble extends StatelessWidget {
     String? statusLabel;
     if (mine) {
       if (isGroup) {
-        if (isDeclined) {
-          statusLabel = 'declined';
-        } else if (isFailed) {
-          statusLabel = 'failed';
-        } else if (deliveredCount == 0) {
+        // 折叠态群聊 sub-line 只看 K = deliveredCount，不报分母也不写整体
+        // declined/failed 字样（终态降饱和由 isDimmed 表达，单个 acceptor 状态
+        // 在展开 detail 行里分别显示）。两条规则：
+        //   K == 0 → "offered to N"
+        //   K > 0  → "delivered to K"   (含 K == fanoutSize 的 clean 终态)
+        if (deliveredCount == 0) {
           statusLabel = 'offered to $fanoutSize';
-        } else if (deliveredCount < fanoutSize) {
-          statusLabel = 'delivered to $deliveredCount / $fanoutSize';
         } else {
-          statusLabel = 'delivered to $fanoutSize';
+          statusLabel = 'delivered to $deliveredCount';
         }
       } else if (offerPending) {
         statusLabel = 'offered';
@@ -2657,10 +2798,14 @@ class _FileBubble extends StatelessWidget {
               border: mine ? null : Border.all(color: AppColors.line),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: Stack(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Stack(
               children: [
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 14, 12),
+                  padding: EdgeInsets.fromLTRB(12, 12, isGroup ? 36 : 14, 12),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
@@ -2730,7 +2875,10 @@ class _FileBubble extends StatelessWidget {
                             const SizedBox(height: 3),
                             Row(
                               children: [
-                                if (offerPending || awaitingAccept) ...[
+                                if ((isGroup
+                                        ? (!isFanoutTerminal &&
+                                            deliveredCount == 0)
+                                        : (offerPending || awaitingAccept))) ...[
                                   _PulseDot(
                                     color: mine ? Colors.white : AppColors.accent,
                                   ),
@@ -2787,10 +2935,273 @@ class _FileBubble extends StatelessWidget {
                       ),
                     ),
                   ),
+                if (isGroup)
+                  Positioned(
+                    right: 6,
+                    top: 0,
+                    bottom: 0,
+                    child: Center(
+                      child: _ChevExpandButton(
+                        expanded: _expanded,
+                        color: mine
+                            ? Colors.white.withValues(alpha: 0.65)
+                            : AppColors.inkFaint,
+                        onTap: () =>
+                            setState(() => _expanded = !_expanded),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+                if (isGroup)
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 240),
+                    curve: Curves.easeOut,
+                    alignment: Alignment.topCenter,
+                    child: _expanded
+                        ? Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                            child: Column(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.stretch,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  height: 1,
+                                  margin: const EdgeInsets.fromLTRB(
+                                      4, 0, 4, 4),
+                                  color: mine
+                                      ? Colors.white
+                                          .withValues(alpha: 0.16)
+                                      : AppColors.line,
+                                ),
+                                for (final entry
+                                    in widget.msg.fanout.entries)
+                                  _PeerFanoutRow(
+                                    peerId: entry.key,
+                                    entry: entry.value,
+                                    fileSize: size,
+                                    mine: mine,
+                                    chat: widget.chat,
+                                  ),
+                              ],
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
               ],
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 右中绝对定位的展开按钮（仅 fanout > 1 的 sender 文件 bubble 显示）。
+/// 22×22 hit area，跟 incoming bubble 的 save 按钮共用同一个视觉 slot。
+/// 展开态 chev 旋转 180°，translateY(-50%) 由父 Center 自动处理（widget 自身居中）。
+class _ChevExpandButton extends StatelessWidget {
+  final bool expanded;
+  final Color color;
+  final VoidCallback onTap;
+  const _ChevExpandButton({
+    required this.expanded,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: SizedBox(
+          width: 26,
+          height: 26,
+          child: Center(
+            child: AnimatedRotation(
+              turns: expanded ? 0.5 : 0,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+              child: Icon(
+                Icons.keyboard_arrow_down_rounded,
+                size: 18,
+                color: color,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// fanout 详情面板里的单行：状态 dot + 名字/handle + 右侧 per-peer 状态。
+/// 颜色规则按 27-fanout.html 注释 06：sending=accent（不脉冲）、其余统一 inkFaint，
+/// 只有 failed 用红 — 文字 word 承担语义。
+class _PeerFanoutRow extends StatelessWidget {
+  final String peerId;
+  final FanoutEntry entry;
+  final int fileSize;
+  final bool mine;
+  final Chat chat;
+  const _PeerFanoutRow({
+    required this.peerId,
+    required this.entry,
+    required this.fileSize,
+    required this.mine,
+    required this.chat,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final peer = chat.peers[peerId];
+    final name = peer?.name ?? _shortHandle(peerId);
+    final mutedFg = mine
+        ? Colors.white.withValues(alpha: 0.62)
+        : AppColors.ink3;
+    final faintFg = mine
+        ? Colors.white.withValues(alpha: 0.4)
+        : AppColors.inkFaint;
+    // 进度条用墨灰不用 accent —— 状态颜色一律去掉，文字 word 承担语义
+    final barFg = mine
+        ? Colors.white.withValues(alpha: 0.55)
+        : AppColors.ink3;
+    final barTrack = mine
+        ? Colors.white.withValues(alpha: 0.18)
+        : Colors.black.withValues(alpha: 0.06);
+
+    // Dot 规则（最简版）：
+    //   delivered → 实心圆
+    //   其他所有状态 (offered / sending / declined / failed) → 空心圆
+    // 颜色统一 inkFaint，状态语义靠右侧文字 word + sending 时的 mini bar 表达
+    Widget dot;
+    Widget rightSlot;
+    switch (entry.state) {
+      case FanoutState.offered:
+        dot = _StateDot(color: faintFg, hollow: true);
+        rightSlot = Text('offered',
+            style: AppFonts.mono(size: 11, color: mutedFg));
+      case FanoutState.sending:
+        dot = _StateDot(color: faintFg, hollow: true);
+        final pct = fileSize > 0
+            ? (entry.bytesTransferred / fileSize).clamp(0.0, 1.0)
+            : 0.0;
+        rightSlot = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 64,
+              height: 3,
+              child: Stack(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: barTrack,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  FractionallySizedBox(
+                    widthFactor: pct,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: barFg,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 32,
+              child: Text(
+                '${(pct * 100).toStringAsFixed(0)}%',
+                textAlign: TextAlign.right,
+                style: AppFonts.mono(size: 10.5, color: mutedFg),
+              ),
+            ),
+          ],
+        );
+      case FanoutState.delivered:
+        // 实心 dot 用纯白（mine 永远 true — fanout 只在 sender 端），比
+        // faintFg 的 40% 白更亮，跟空心圈形成"完成 vs 未完成"对比
+        dot = _StateDot(color: mine ? Colors.white : AppColors.ink);
+        rightSlot = Text('delivered',
+            style: AppFonts.mono(size: 11, color: mutedFg));
+      case FanoutState.declined:
+        dot = _StateDot(color: faintFg, hollow: true);
+        rightSlot = Text('declined',
+            style: AppFonts.mono(size: 11, color: mutedFg));
+      case FanoutState.failed:
+        dot = _StateDot(color: faintFg, hollow: true);
+        rightSlot = Text('failed',
+            style: AppFonts.mono(size: 11, color: mutedFg));
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+      child: Row(
+        children: [
+          SizedBox(width: 14, child: Center(child: dot)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  name,
+                  style: AppFonts.body(
+                    size: 13,
+                    weight: FontWeight.w600,
+                    color: mine ? Colors.white : AppColors.ink,
+                    letterSpacing: -0.005,
+                    height: 1.2,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  _shortHandle(peerId),
+                  style: AppFonts.mono(
+                    size: 10,
+                    color: mutedFg,
+                    letterSpacing: 0.04,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          rightSlot,
+        ],
+      ),
+    );
+  }
+}
+
+class _StateDot extends StatelessWidget {
+  final Color color;
+  final bool hollow;
+  const _StateDot({required this.color, this.hollow = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(
+        color: hollow ? Colors.transparent : color,
+        shape: BoxShape.circle,
+        border: hollow ? Border.all(color: color, width: 1.5) : null,
       ),
     );
   }

@@ -25,6 +25,8 @@ class Chat extends ChangeNotifier {
   final Map<String, String> _androidSessions = {};
   final Map<String, Future<void>> _androidChain = {};
   final Map<String, File> _outgoingFiles = {};
+  // msgId → 发送方 peerId，用于 channel 关闭时清理对应方向的 incoming sink
+  final Map<String, String> _incomingFrom = {};
   // bonsoir_android 的 lost 事件 attrs 不可靠（拿到的是本机自己的 attrs），
   // 需要按 mDNS service.name 反查真实 peerId。`_onPeerFound` 时维护映射。
   final Map<String, String> _svcNameToPeerId = {};
@@ -238,12 +240,43 @@ class Chat extends ChangeNotifier {
   }
 
   void _onChannelClosed(String peerId) {
+    // 清掉这个 peer 方向上还在进行中的接收任务 — channel 一断对端不会再发 chunk，
+    // sink 留着只会泄漏；msg 标 failed 让 UI 给用户反馈。sender 那边的 _outgoingFlows
+    // 已经由 transport 自己 fail 掉了。
+    final affected = _incomingFrom.entries
+        .where((e) => e.value == peerId)
+        .map((e) => e.key)
+        .toList();
+    for (final msgId in affected) {
+      _incomingFrom.remove(msgId);
+      _androidSessions.remove(msgId);
+      _androidChain.remove(msgId);
+      final sink = _incomingSinks.remove(msgId);
+      if (sink != null) {
+        () async {
+          try {
+            await sink.flush();
+          } catch (_) {}
+          try {
+            await sink.close();
+          } catch (_) {}
+        }();
+      }
+      final idx = messages.lastIndexWhere((m) => m.id == msgId);
+      if (idx != -1) {
+        final m = messages[idx];
+        if (m.status == SendStatus.pending || m.awaitingAccept) {
+          m.status = SendStatus.failed;
+          m.awaitingAccept = false;
+        }
+      }
+    }
     final p = peers[peerId];
     if (p != null && p.online) {
       debugPrint('[chat] channel down $peerId → mark offline');
       p.online = false;
-      notifyListeners();
     }
+    if (affected.isNotEmpty || (p != null && !p.online)) notifyListeners();
   }
 
   void _onIncoming(ChatMessage msg) {
@@ -278,6 +311,7 @@ class Chat extends ChangeNotifier {
     msg.status = SendStatus.pending;
     debugPrint(
         '[chat] incoming file_offer id=${msg.id} name=${msg.fileName} size=${msg.fileSize} autoAccept=$autoAcceptFiles');
+    _incomingFrom[msg.id] = fromPeerId;
     if (autoAcceptFiles) {
       messages.add(msg);
       notifyListeners();
@@ -318,6 +352,7 @@ class Chat extends ChangeNotifier {
     msg.awaitingAccept = false;
     msg.status = SendStatus.failed;
     msg.declined = true;
+    _incomingFrom.remove(msgId);
     notifyListeners();
     _transport.sendFileResponse(msg.fromId, msg.id, false);
   }
@@ -347,9 +382,9 @@ class Chat extends ChangeNotifier {
     _transport.sendFileBytes(
       msgId,
       file,
-      [fromPeerId],
-      onProgress: (sent) {
-        entry.bytesTransferred = sent;
+      fromPeerId,
+      onProgress: (acked) {
+        entry.bytesTransferred = acked;
         msg.bytesTransferred = _maxFanoutBytes(msg);
         notifyListeners();
       },
@@ -434,7 +469,7 @@ class Chat extends ChangeNotifier {
     }
   }
 
-  void _onFileChunk(String msgId, Uint8List bytes) {
+  void _onFileChunk(String msgId, int seq, Uint8List bytes, String fromPeerId) {
     if (Platform.isAndroid && _androidChain.containsKey(msgId)) {
       final prev = _androidChain[msgId]!;
       _androidChain[msgId] = prev.then((_) async {
@@ -444,6 +479,8 @@ class Chat extends ChangeNotifier {
           'sessionId': sid,
           'bytes': bytes,
         });
+        // 写盘成功后才 ack — 让 sender 的窗口反映 receiver 的真实处理速度
+        _transport.sendChunkAck(fromPeerId, msgId, seq);
         final idx = messages.lastIndexWhere((m) => m.id == msgId);
         if (idx != -1) {
           messages[idx].bytesTransferred += bytes.length;
@@ -451,12 +488,14 @@ class Chat extends ChangeNotifier {
         }
       }).catchError((e, st) {
         debugPrint('[chat] appendChunk failed id=$msgId: $e\n$st');
+        // 故意不 ack — sender 端 idle watchdog 会在 15s 后判 fail
       });
       return;
     }
     final sink = _incomingSinks[msgId];
     if (sink == null) return;
     sink.add(bytes);
+    _transport.sendChunkAck(fromPeerId, msgId, seq);
     final idx = messages.lastIndexWhere((m) => m.id == msgId);
     if (idx != -1) {
       messages[idx].bytesTransferred += bytes.length;
@@ -490,6 +529,8 @@ class Chat extends ChangeNotifier {
           messages[idx].status = SendStatus.failed;
           notifyListeners();
         }
+      } finally {
+        _incomingFrom.remove(msgId);
       }
       return;
     }
@@ -498,6 +539,7 @@ class Chat extends ChangeNotifier {
       await sink.flush();
       await sink.close();
     }
+    _incomingFrom.remove(msgId);
     final idx = messages.lastIndexWhere((m) => m.id == msgId);
     if (idx == -1) return;
     final m = messages[idx];

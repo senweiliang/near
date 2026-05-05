@@ -17,7 +17,8 @@ class Transport {
   final void Function(ChatMessage msg, String fromPeerId) onFileOffer;
   final void Function(String msgId, String fromPeerId) onFileAccept;
   final void Function(String msgId, String fromPeerId) onFileDecline;
-  final void Function(String msgId, Uint8List bytes) onFileChunk;
+  final void Function(String msgId, int seq, Uint8List bytes, String fromPeerId)
+      onFileChunk;
   final void Function(String msgId) onFileEnd;
   final void Function(String peerId)? onChannelEstablished;
   final void Function(String peerId)? onChannelClosed;
@@ -28,7 +29,21 @@ class Transport {
   final Map<String, (String host, int port)> _knownPeers = {};
   final Map<String, Completer<bool>> _pendingProbes = {};
   final Map<WebSocketChannel, Timer> _keepAlive = {};
+  // 每个进行中的文件发送流（sender 端），按 (msgId, peerId) 复合 key 索引。
+  // 群聊 fanout 时同一 msgId 会对每个 acceptor 各跑一个独立 sendFileBytes（每个
+  // acceptor 一份独立流），所以单 msgId 不足以唯一标识。
+  final Map<String, _OutgoingFlow> _outgoingFlows = {};
+  static String _flowKey(String msgId, String peerId) => '$msgId|$peerId';
   static const _keepAliveInterval = Duration(seconds: 10);
+  // 文件传输窗口大小：sender 持续塞 chunk 直到在途未 ack 字节达到上限，然后等 ack 腾位。
+  // 1 MB 在 LAN BDP 之上、又能保证背压可控，单 peer 单文件场景内存占用 ≈ 1 MB。
+  static const _kInflightBytesLimit = 1 * 1024 * 1024;
+  static const _kFileChunkSize = 64 * 1024;
+  // 单条流多久没收到任何 chunk_ack 视为对端假死 / 写盘卡死，整体 fail。
+  // LAN 场景下正常 ack 间隔 = receiver 单 chunk 处理时间（base64Decode + 写盘），
+  // iOS/macOS 通常 < 1ms，Android MediaStore 串行链最差 ~50ms。2s 足以覆盖正常
+  // 处理延迟，超过基本就是真假死（对端 crash / 网线拔了 / Wi-Fi 切换中）。
+  static const _kAckIdleTimeout = Duration(seconds: 2);
 
   Iterable<String> get connectedPeerIds => _channels.keys;
 
@@ -179,13 +194,23 @@ class Transport {
             case 'file_chunk':
               final mid = m['id'] as String?;
               final data = m['data'] as String?;
-              if (mid != null && data != null) {
+              final seq = m['seq'] as int?;
+              if (mid != null && data != null && seq != null) {
+                final from = peerId ?? _peerIdOf(ws);
+                if (from == null) break;
                 try {
-                  onFileChunk(mid, base64Decode(data));
+                  onFileChunk(mid, seq, base64Decode(data), from);
                 } catch (e, st) {
                   debugPrint(
                       '[transport] file_chunk handler threw: $e\n$st');
                 }
+              }
+            case 'file_chunk_ack':
+              final mid = m['id'] as String?;
+              final seq = m['seq'] as int?;
+              if (mid != null && seq != null) {
+                final from = peerId ?? _peerIdOf(ws);
+                if (from != null) _handleChunkAck(mid, from, seq);
               }
             case 'file_end':
               final mid = m['id'] as String?;
@@ -212,6 +237,7 @@ class Transport {
         _keepAlive.remove(ws)?.cancel();
         if (peerId != null && _channels[peerId] == ws) {
           _channels.remove(peerId);
+          _failFlowsOf(peerId!, StateError('channel closed'));
           onChannelClosed?.call(peerId!);
           _scheduleRedial(peerId!);
         }
@@ -236,6 +262,7 @@ class Transport {
         _keepAlive.remove(ws)?.cancel();
         if (peerId != null && _channels[peerId] == ws) {
           _channels.remove(peerId);
+          _failFlowsOf(peerId!, e);
           onChannelClosed?.call(peerId!);
           _scheduleRedial(peerId!);
         }
@@ -295,45 +322,83 @@ class Transport {
     }
   }
 
+  /// 发送文件给单个 peer。窗口化 ack 协议：
+  /// - sender 把 chunk 塞 sink 直到在途未 ack 字节达到 [_kInflightBytesLimit]，然后等 ack 腾位
+  /// - receiver 每写完一个 chunk 回 file_chunk_ack(id, seq)，sender 端 [_handleChunkAck] 推进窗口
+  /// - [_kAckIdleTimeout] 内没收到任何新 ack 视为对端假死，整体 fail（无须依赖 onAppResumed probe）
+  ///
+  /// fanout 群聊场景由 chat 层按 acceptor 独立调用本函数实现 — 每个 acceptor 一份独立流
+  /// 一份独立 [_OutgoingFlow]。
   Future<void> sendFileBytes(
     String msgId,
     File file,
-    List<String> toPeerIds, {
-    void Function(int sent)? onProgress,
-    void Function()? onComplete,
-    void Function(Object error)? onError,
+    String toPeerId, {
+    required void Function(int ackedBytes) onProgress,
+    required void Function() onComplete,
+    required void Function(Object error) onError,
   }) async {
-    final channels = <WebSocketChannel>[];
-    for (final pid in toPeerIds) {
-      final ch = _channels[pid];
-      if (ch != null) channels.add(ch);
+    final ch = _channels[toPeerId];
+    if (ch == null) {
+      onError(StateError('no channel for $toPeerId'));
+      return;
     }
-    if (channels.isEmpty) {
-      onError?.call(StateError('no channel for $toPeerIds'));
+    final flowKey = _flowKey(msgId, toPeerId);
+    if (_outgoingFlows.containsKey(flowKey)) {
+      onError(StateError(
+          'flow already running for msg=$msgId peer=$toPeerId'));
       return;
     }
 
-    debugPrint(
-        '[transport] sendFileBytes id=$msgId peers=${channels.length}');
-
-    const chunkSize = 64 * 1024;
     RandomAccessFile? raf;
     try {
       raf = await file.open();
     } catch (e, st) {
       debugPrint('[transport] sendFileBytes open failed: $e\n$st');
-      onError?.call(e);
+      onError(e);
       return;
     }
-    int offset = 0;
+
+    final flow = _OutgoingFlow(
+      msgId: msgId,
+      peerId: toPeerId,
+      onProgress: onProgress,
+    );
+    _outgoingFlows[flowKey] = flow;
+    flow.watchdog =
+        Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (flow.failed) return;
+      if (flow.inflight.isEmpty) return;
+      final idle = DateTime.now().difference(flow.lastAckAt);
+      if (idle > _kAckIdleTimeout) {
+        debugPrint(
+            '[transport] sendFileBytes idle timeout id=$msgId peer=$toPeerId idle=${idle.inSeconds}s');
+        _markFlowFailed(
+            flow,
+            TimeoutException(
+                'no chunk ack for ${_kAckIdleTimeout.inSeconds}s'));
+      }
+    });
+
+    debugPrint(
+        '[transport] sendFileBytes id=$msgId peer=$toPeerId start');
     int seq = 0;
     try {
       while (true) {
-        final buf = Uint8List(chunkSize);
+        // 等待窗口腾位
+        while (!flow.failed &&
+            _inflightBytes(flow) >= _kInflightBytesLimit) {
+          flow.slotWaiter ??= Completer<void>();
+          await flow.slotWaiter!.future;
+        }
+        if (flow.failed) {
+          throw flow.failReason ?? StateError('flow failed');
+        }
+        final buf = Uint8List(_kFileChunkSize);
         final read = await raf.readInto(buf);
         if (read == 0) break;
-        final bytes =
-            read < chunkSize ? Uint8List.sublistView(buf, 0, read) : buf;
+        final bytes = read < _kFileChunkSize
+            ? Uint8List.sublistView(buf, 0, read)
+            : buf;
         final encoded = base64Encode(bytes);
         final payload = jsonEncode({
           'type': 'file_chunk',
@@ -341,28 +406,87 @@ class Transport {
           'seq': seq,
           'data': encoded,
         });
-        for (final ch in channels) {
-          ch.sink.add(payload);
-        }
-        offset += read;
+        ch.sink.add(payload);
+        flow.inflight[seq] = read;
         seq += 1;
-        onProgress?.call(offset);
         await Future<void>.delayed(Duration.zero);
       }
-      final endPayload = jsonEncode({'type': 'file_end', 'id': msgId});
-      for (final ch in channels) {
-        ch.sink.add(endPayload);
+      // 主循环读完后 drain：等所有在途 chunk 收到 ack 才发 file_end
+      while (!flow.failed && flow.inflight.isNotEmpty) {
+        flow.slotWaiter ??= Completer<void>();
+        await flow.slotWaiter!.future;
       }
-      debugPrint('[transport] sendFileBytes done id=$msgId bytes=$offset');
-      onComplete?.call();
+      if (flow.failed) {
+        throw flow.failReason ?? StateError('flow failed');
+      }
+      ch.sink.add(jsonEncode({'type': 'file_end', 'id': msgId}));
+      debugPrint(
+          '[transport] sendFileBytes done id=$msgId acked=${flow.ackedBytes}');
+      onComplete();
     } catch (e, st) {
-      debugPrint('[transport] sendFileBytes chunk loop failed: $e\n$st');
-      onError?.call(e);
+      debugPrint('[transport] sendFileBytes failed id=$msgId: $e\n$st');
+      onError(e);
     } finally {
+      flow.watchdog?.cancel();
+      _outgoingFlows.remove(flowKey);
       try {
         await raf.close();
       } catch (_) {}
     }
+  }
+
+  void sendChunkAck(String toPeerId, String msgId, int seq) {
+    final ch = _channels[toPeerId];
+    if (ch == null) return;
+    try {
+      ch.sink.add(jsonEncode({
+        'type': 'file_chunk_ack',
+        'id': msgId,
+        'seq': seq,
+      }));
+    } catch (e) {
+      debugPrint(
+          '[transport] sendChunkAck failed peer=$toPeerId id=$msgId seq=$seq: $e');
+    }
+  }
+
+  void _handleChunkAck(String msgId, String fromPeerId, int seq) {
+    final flow = _outgoingFlows[_flowKey(msgId, fromPeerId)];
+    if (flow == null || flow.failed) return;
+    final bytes = flow.inflight.remove(seq);
+    if (bytes == null) return;
+    flow.ackedBytes += bytes;
+    flow.lastAckAt = DateTime.now();
+    flow.onProgress(flow.ackedBytes);
+    final waiter = flow.slotWaiter;
+    flow.slotWaiter = null;
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
+  }
+
+  int _inflightBytes(_OutgoingFlow flow) {
+    var sum = 0;
+    for (final b in flow.inflight.values) {
+      sum += b;
+    }
+    return sum;
+  }
+
+  void _failFlowsOf(String peerId, Object reason) {
+    for (final flow in _outgoingFlows.values) {
+      if (flow.peerId == peerId && !flow.failed) {
+        _markFlowFailed(flow, reason);
+      }
+    }
+  }
+
+  void _markFlowFailed(_OutgoingFlow flow, Object reason) {
+    flow.failed = true;
+    flow.failReason = reason;
+    flow.watchdog?.cancel();
+    flow.watchdog = null;
+    final waiter = flow.slotWaiter;
+    flow.slotWaiter = null;
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
   }
 
   int get peerCount => _channels.length;
@@ -373,8 +497,12 @@ class Transport {
   }
 
   void closeAllChannels() {
+    final ids = _channels.keys.toList();
     final list = _channels.values.toList();
     _channels.clear();
+    for (final id in ids) {
+      _failFlowsOf(id, StateError('all channels closed'));
+    }
     for (final ch in list) {
       _keepAlive.remove(ch)?.cancel();
       try {
@@ -387,6 +515,7 @@ class Transport {
     final ch = _channels.remove(peerId);
     if (ch != null) {
       _keepAlive.remove(ch)?.cancel();
+      _failFlowsOf(peerId, StateError('peer dropped'));
       try {
         ch.sink.close();
       } catch (_) {}
@@ -469,4 +598,25 @@ class Transport {
       connectTo(endpoint.$1, endpoint.$2, peerId);
     });
   }
+}
+
+class _OutgoingFlow {
+  final String msgId;
+  final String peerId;
+  final void Function(int ackedBytes) onProgress;
+  // 已塞 sink 但未收到 ack 的 chunk: seq → bytes
+  final Map<int, int> inflight = {};
+  int ackedBytes = 0;
+  // sender 主循环窗口满 / drain 时挂在这个 Completer 上，每收到一个 ack 唤醒一次
+  Completer<void>? slotWaiter;
+  Timer? watchdog;
+  DateTime lastAckAt = DateTime.now();
+  bool failed = false;
+  Object? failReason;
+
+  _OutgoingFlow({
+    required this.msgId,
+    required this.peerId,
+    required this.onProgress,
+  });
 }

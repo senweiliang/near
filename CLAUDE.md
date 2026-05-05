@@ -100,7 +100,7 @@ PeerList tile 的 meta 行通过顶层 `_peerPreview(chat, peer)` 计算最近�
 
 1. **协商**：sender 发 `file_offer`（携带 ChatMessage 元数据，无字节）。receiver 根据 `autoAcceptFiles` 设置决定立即回复 `file_accept` 或先把 bubble 标 `awaitingAccept` 等用户点 Accept/Ignore，对应回 `file_accept` 或 `file_decline`
 2. **传输（窗口化 ack）**：sender 收到 `file_accept` 后开始 `file_chunk(id, seq, data=base64)` → `file_end(id)`。chunk size 64KB，sender 维护 per-msgId 的 `_OutgoingFlow`，inflight bytes 上限 1 MB（约 16 个 chunk）。窗口满时主循环挂在 `slotWaiter` Completer 上等。**receiver 每写完一个 chunk 回 `file_chunk_ack(id, seq)`**（Android 走 `_androidChain` 异步链，链尾 ack；其他平台 `sink.add` 后立即 ack），sender 收到 ack 推进窗口 + 累加 acked 字节作进度。`file_end` 在所有 inflight 都 ack 后才发，确保 receiver 端 sink 已 flush 全部字节
-3. **传输健康检查**：sender 端每条流挂一个 2s 周期 watchdog，**`_kAckIdleTimeout = 15s`** 内没收到任何新 ack → 整体 fail。channel 关闭时 `_failFlowsOf(peerId)` 唤醒所有挂在 slotWaiter 上的 sender 循环，避免永远等。**这套 in-band 检测取代了过去依赖 `onAppResumed` probe + 文本 ACK 500ms 超时来兜文件场景的设计**，sender 不再误判活的为死的，也不会在对端真死时误标 delivered（旧 fire-and-forget 实现的失败模式）
+3. **传输健康检查**：sender 端每条流挂一个 500ms 周期 watchdog，**`_kAckIdleTimeout = 2s`** 内没收到任何新 ack → 整体 fail。LAN 场景下正常 ack 间隔 = receiver 单 chunk 处理时间（base64Decode + 写盘，iOS/macOS < 1ms，Android MediaStore 串行链最差 ~50ms），2s 足以覆盖正常延迟，超过基本就是真假死（对端 crash / 网线拔了 / Wi-Fi 切换中）。channel 关闭时 `_failFlowsOf(peerId)` 唤醒所有挂在 slotWaiter 上的 sender 循环，避免永远等。**这套 in-band 检测取代了过去依赖 `onAppResumed` probe + 文本 ACK 500ms 超时来兜文件场景的设计**，sender 不再误判活的为死的，也不会在对端真死时误标 delivered（旧 fire-and-forget 实现的失败模式）
 4. **群聊 fanout**：`sendFile` 时按 `connectedPeerIds`（私聊则是 `[toId]`）把每个 peer 写进 `msg.fanout` 表，初始 `FanoutState.offered`。`file_offer` 广播给所有 channel
    - **首个 `file_accept` 进来**：该 entry → `sending`，清 `msg.offerPending`（让 progress bar 开始动），单独跑 `sendFileBytes(file, thatPeerId)`，progress 是 receiver ack 累计字节
    - **`file_decline`**：entry → `declined`（**注意：不是 `failed`**，declined 是接收方主动拒绝，正常终态，不算发送失败）
@@ -208,7 +208,7 @@ iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/near_files/{msgId}
 - mono 字体专门承载 ID / 系统状态 / 协议出处这类"机器信息"，强化"本地协议工具"氛围
 
 ### 文件 bubble 文案规则（_FileBubble statusLabel）
-**没有 ✓ chip / retry chip**。状态完全靠 mono 副标文字 + bottom progress bar 表达 — 跟 Near 整体的「机器信息」克制美学一致，也避免 chip 跟文字争 sub-line 横向空间（fileName 长 + sub-line 长 + 12px chip 三方挤压会截断 K/N 文字）。
+**没有 ✓ chip / retry chip**。状态完全靠 mono 副标文字 + bottom progress bar（私聊）或 chev 展开详情（群聊）表达。设计稿原型在 `../lan-chat-designs/27-fanout.html`。
 
 私聊（fanoutSize ≤ 1）保持单一状态词：
 
@@ -222,19 +222,29 @@ iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/near_files/{msgId}
 | receiver awaitingAccept | `offered`（带 Accept/Ignore 按钮）|
 | receiver 接收完成 | `downloaded` |
 
-群聊（mine && fanoutSize > 1）按方案 A 用「K / N」聚合，复用顶层 `isDeclined` / `isFailed` flag：
+**群聊（mine && fanoutSize > 1）只看 K = deliveredCount，去分母、去 declined/failed 整体词**：
 
 | 状态 | 文案 |
 | --- | --- |
-| `isDeclined`（全部 declined）| `declined` |
-| `isFailed`（全部失败但无 delivered）| `failed` |
-| `delivered == 0` 其他 | `offered to N` |
-| `0 < delivered < N` | `delivered to K / N` |
-| `delivered == N` | `delivered to N` |
+| K == 0 | `offered to N` |
+| K > 0（含 K == N 的 clean 终态）| `delivered to K` |
 
-刻意不显示 `sending to {names}` 这种长文案 —— sub-line 高度只够单行 mono 字号；分母 `N` 只是 fanout 表初始大小，途中拒绝/失败也不缩，目的是让发送方"少几个就重发或私聊问"。
+唯一的两条规则。`declined` / `failed` 不再上 sub-line — 这两种是**单个 acceptor**的事实，应该出现在展开 detail 行里、不应该让一个被拒绝拖走整条 bubble 的语义。N 的值用户随时能展开看到 N 行，无需在折叠态写分母。
+
+**K=0 终态不 dim**：即使 fanout 全部进入终态且 deliveredCount==0（全 declined / 全 failed / 混合），bubble 仍维持原色 — 不视觉惩罚一条没人收到的消息。sub-line 仍写 `offered to N`，副标脉冲点取消（靠 `isFanoutTerminal` 判），用户点 chev 展开看每个 acceptor 是 declined 还是 failed。
+
+**chev 展开按钮**：仅 `fanoutSize > 1` 时显示。22×22 InkWell hit area，绝对定位 bubble 右中（Stack + Positioned right:6, top:0, bottom:0 + Center），跟 incoming bubble 的 save 按钮共用同一视觉 slot。`AnimatedRotation` 200ms 旋转 180° 表展开态。点击 toggle 局部 `_expanded` state（`_FileBubble` 改成 StatefulWidget 持有）。
+
+**detail 列表**：`AnimatedSize` 240ms easeOut 包 `Column`，每行一个 `_PeerFanoutRow`：
+- 8×8 dot 颜色统一 inkFaint，**`delivered` → 实心圆，其他所有状态（offered / sending / declined / failed）→ 空心圆**
+- name + handle 两行
+- 右侧：sending 时 64×3 mini bar（fill 用 ink-3 灰）+ % 文字；其他状态显示 `offered` / `delivered` / `declined` / `failed` 单词，文字色统一 mutedFg
+
+> **detail 行不用任何状态颜色 + 不用动效**：dot 颜色统一 inkFaint、文字统一 mutedFg、不脉冲。状态语义全靠右侧 word + delivered/未 delivered 的 fill 二元区分。理由：状态颜色（绿/红/蓝）让 fanout 列表读起来像"通过 / 失败"评估面板，破坏 Near 的克制工具感；动效在 fanout > 5 行的列表里抢注意力。fill/word 二元已经够了。
 
 > **declined ≠ failed**：`_MessageBubble` 在 `status == SendStatus.failed` 时显示红色 ⚠️ Tooltip "Send failed"。设计上 declined 是接收方主动选择，正常终态，不该触发这个标记。所以 `_maybeFinalizeFanout` 在"全 declined"时把 `msg.status` 设为 `delivered` + `declined=true`（不是 `failed`），避免误标。
+
+> **群聊不显示底部 progress bar**：`showProgress` 条件加了 `&& !isGroup`。群聊聚合一条总进度条要么 max（撒谎，最快那个 100% 时其他还在传）、要么 average（慢的拖累快的）、要么 sum/N（一种 average 变体），都不诚实。改为：群聊把整体进度交给副标文案（K/N）+ 展开 detail 里 per-peer mini bar 承担。私聊 / receiver 维持原 progress bar 行为。
 
 ### Auto-accept 设置
 Settings → Receiving → `Auto-accept files` 切换。关掉后：
@@ -299,4 +309,5 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 - **多实例本地测试**：通过 `NEAR_TEST_ID=alice ./build/macos/Build/Products/Release/near.app/Contents/MacOS/near &` 启动独立实例（不读 SharedPreferences、用独立 myId / 独立 `near_files_$testId` 文件缓存目录、强制 autoAcceptFiles=true）。同机两实例之间 dial loopback 时 dedupe 风暴有真 bug —— alice/bob 同机互联会出 `dedupe close` 死循环，偶发 SIGSEGV，跨机正常
 - **iOS 后台保活未做**：scope 收敛到 Android。要做需要 BGTaskScheduler 唤醒 + 重连 / VoIP push（后者得后端，违背 no-server 原则）
 - `super_clipboard` 在 Linux / Windows 桌面端尚未验证，目前只跑 macOS / iOS / Android
-- 设计稿目录 `../lan-chat-designs/` 是 HTML 原型，是 source of truth；改 UI 前先去看对应文件（`24-near.html` 主屏，`25-files.html` 文件交互）
+- 设计稿目录 `../lan-chat-designs/` 是 HTML 原型，是 source of truth；改 UI 前先去看对应文件（`24-near.html` 主屏，`25-files.html` 文件交互，`27-fanout.html` 群聊文件 fanout 详情面板）
+- **进入对话时仍偶发"弹一下"**：现有的 `_initialSettled` 机制（`home_page.dart:835` Opacity gate + `_jumpToEnd` 用 post-frame callback 跳到底）在消息很多 / 长会话时仍然能看到一帧顶端位置然后跳底。原因：`_jumpToEnd` 在第一个 post-frame 跑完之后才触发，但首帧 layout 已经出来；Opacity 0 → 1 切换那一帧 ListView 还在算尺寸，可能 jump 不准。修法方向：换成 `reverse: true` 的 ListView（自然贴底）+ 反向 messages 顺序；或者用 `ScrollablePositionedList` 直接定位到 last index 不依赖跳像素
