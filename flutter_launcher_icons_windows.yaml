@@ -1,0 +1,9 @@
+# 仅 Windows 图标配置，供 CI 在 `flutter create --platforms=windows` 之后生成 .ico。
+# 单独成文件是因为本地无 windows/ 目录，放进主配置会让本地 `dart run flutter_launcher_icons` 报错。
+# 跑法（CI）：dart run flutter_launcher_icons -f flutter_launcher_icons_windows.yaml
+flutter_launcher_icons:
+  image_path: "tool/logo_master.png"
+  windows:
+    generate: true
+    image_path: "tool/logo_master.png"
+    icon_size: 256

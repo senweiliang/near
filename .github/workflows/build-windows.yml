@@ -24,6 +24,9 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Generate Windows app icon
+        run: dart run flutter_launcher_icons -f flutter_launcher_icons_windows.yaml
+
       - name: Build Windows release
         run: flutter build windows --release
 
