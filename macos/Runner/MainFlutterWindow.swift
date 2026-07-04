@@ -8,9 +8,10 @@ class MainFlutterWindow: NSWindow {
     self.alphaValue = 0.0
 
     let flutterViewController = FlutterViewController()
-    let windowFrame = self.frame
     self.contentViewController = flutterViewController
-    self.setFrame(windowFrame, display: true)
+    // 默认打开尺寸：内容区 400×600，居中显示
+    self.setContentSize(NSSize(width: 400, height: 600))
+    self.center()
 
     flutterViewController.view.wantsLayer = true
     flutterViewController.view.layer?.backgroundColor = NSColor.white.cgColor
