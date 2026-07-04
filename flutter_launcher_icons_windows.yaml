@@ -1,9 +1,12 @@
 # 仅 Windows 图标配置，供 CI 在 `flutter create --platforms=windows` 之后生成 .ico。
 # 单独成文件是因为本地无 windows/ 目录，放进主配置会让本地 `dart run flutter_launcher_icons` 报错。
 # 跑法（CI）：dart run flutter_launcher_icons -f flutter_launcher_icons_windows.yaml
+#
+# image_path 指向 Figma 导出的 256x256 源图（跟 icon_size 一致，零缩放），而不是 1024
+# 母图缩小——避免圆角这种硬边在缩放时丢抗锯齿、出锯齿边。见 CLAUDE.md「App 图标生成」。
 flutter_launcher_icons:
-  image_path: "tool/logo_master.png"
+  image_path: "tool/logo_windows_256.png"
   windows:
     generate: true
-    image_path: "tool/logo_master.png"
+    image_path: "tool/logo_windows_256.png"
     icon_size: 256

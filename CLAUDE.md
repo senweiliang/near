@@ -295,6 +295,23 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 | macOS | `getDownloadsDirectory()` → `~/Downloads/near-{ms}.jpg` |
 | Linux / Windows | `FilePicker.platform.saveFile` 弹 Finder 对话框 |
 
+### App 图标生成：Figma 手工导出，不用脚本
+图标是启动页同款 "Near." wordmark（Hanken Grotesk Bold），源文件在 Figma：<https://www.figma.com/design/IRhtyJt989MpYOi3Qy81Ax>（"Icon Card 1024" = 白色圆角卡片版，"Icon FG 1024" = 透明底纯文字版）。改设计（换色、调字号等）直接去这个 Figma 文件改，改完在每个 frame 的 Export 面板按下表加导出行（单位用 `<数字>w` 固定宽度，不要用倍数），导出后按尺寸对应放到目标路径：
+
+- macOS `AppIcon.appiconset`（"Icon Card 1024" 导出 16/32/64/128/256/512/1024）：`macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_{size}.png`
+- Android legacy（同上 frame 导出 48/72/96/144/192）：`android/app/src/main/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`
+- Android adaptive 前景（"Icon FG 1024" 导出 108/162/216/324/432）：`android/app/src/main/res/drawable-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher_foreground.png`
+- Windows（CI 用，"Icon Card 1024" 导出 256）：`tool/logo_windows_256.png`（跟 `flutter_launcher_icons_windows.yaml` 的 `icon_size: 256` 一致，零缩放）
+
+**为什么不用脚本批量生成**：最早是用 Flutter（`flutter test` 里渲染 widget 再 `toImage`/`toByteData` 存 PNG）本地生成所有尺寸，中途踩了两个坑才放弃：
+1. 一开始渲染一张 1024 母图交给 `flutter_launcher_icons` 缩放成各尺寸，圆角卡片的硬边细节在 60+ 倍缩放下丢失抗锯齿，小尺寸图标边缘出现锯齿/重影
+2. 改成每个尺寸原生渲染（不缩放）之后，又在 `flutter_test` harness 里稳定复现一个 Flutter 引擎的已知问题（[flutter/flutter#49317](https://github.com/flutter/flutter/issues/49317)，多年未修）：`RenderRepaintBoundary.toImage()` 之后调用 `image.toByteData(format: PNG)` 会挂死，10 分钟后被 `flutter_test` 默认超时强杀
+所以改成在 Figma 里画（矢量文字 + 矢量圆角矩形），用 Figma 自己的渲染器按每个目标尺寸单独导出——同样是"按目标分辨率原生光栅化，不缩放"，但避开了 Flutter 这个引擎 bug。**Figma 免费版 MCP 集成每月的读/写调用配额很低**（`download_assets` / `use_figma` 撞过一次），批量导出这种一次性、大量调用的操作直接在 Figma 网页的 Export 面板里手动做，不要尝试用 MCP 工具批量跑。
+
+`card: true`（白色圆角卡片烤进 PNG 本体，对应 Figma 里 "Icon Card 1024"）用于 macOS app icon / Android legacy 单图标 / Windows .ico —— 这几处系统不提供背景层，透明区域会真的透明、露出桌面壁纸或托盘背景，所以背景得自己烤进去。`card: false`（纯文字透明底，对应 "Icon FG 1024"）只用于 Android adaptive icon 前景层——背景色由 `android/app/src/main/res/values/colors.xml` 里的 `ic_launcher_background`（`#FFFFFF`）和 `mipmap-anydpi-v26/ic_launcher.xml` 拼出来，系统负责按各家 launcher 的形状蒙版（圆形/圆角方形等）裁剪合成，不需要也不应该自己烤白底。
+
+主配置 `flutter_launcher_icons.yaml` 已删除（macOS/Android 图标不再需要它）；Windows 因为本地没有 `windows/` 目录，`flutter_launcher_icons_windows.yaml` 仍保留给 CI 用，`image_path` 指向 `tool/logo_windows_256.png`（Figma 导出，不是本地脚本生成）。`tool/HankenGrotesk.ttf` / `tool/logo_master.png` / `tool/logo_fg.png` 是历史脚本留下的参考文件（`logo_master.png`/`logo_fg.png` 内容已同步成 Figma 导出版本），不参与实际构建。
+
 ---
 
 ## 七、已知优化方向 / 给后续会话的提示
