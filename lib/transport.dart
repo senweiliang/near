@@ -519,6 +519,10 @@ class Transport {
       try {
         ch.sink.close();
       } catch (_) {}
+      // 主动 drop 时 _channels 已移除，稍后 onDone 的守卫会被跳过、不会再回调，
+      // 所以这里显式补一次 onChannelClosed，让 chat 侧一致地清理接收任务 / 标失败
+      // 在途图片 / 置 peer offline（否则 probe-drop 路径下这些不会发生）。
+      onChannelClosed?.call(peerId);
     }
   }
 

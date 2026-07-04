@@ -317,12 +317,28 @@ class Chat extends ChangeNotifier {
         }
       }
     }
+    // 图片走 event-driven lifecycle（见 _dispatch）：channel 断了，把发往该 peer
+    // 还没 ack 的在途图片标 failed。群发图（toId==null）只在再没有任何 channel 时
+    // 才算失败——只要还有别的 peer 在，就继续等它们的 ack。
+    var imageFailed = false;
+    for (final m in messages) {
+      if (m.fromId != myId || !m.hasImage) continue;
+      if (m.status != SendStatus.pending) continue;
+      final targetGone =
+          m.toId == peerId || (m.toId == null && _transport.peerCount == 0);
+      if (targetGone) {
+        m.status = SendStatus.failed;
+        imageFailed = true;
+      }
+    }
     final p = peers[peerId];
     if (p != null && p.online) {
       debugPrint('[chat] channel down $peerId → mark offline');
       p.online = false;
     }
-    if (affected.isNotEmpty || (p != null && !p.online)) notifyListeners();
+    if (affected.isNotEmpty || imageFailed || (p != null && !p.online)) {
+      notifyListeners();
+    }
   }
 
   void _onIncoming(ChatMessage msg) {
@@ -785,6 +801,13 @@ class Chat extends ChangeNotifier {
       return;
     }
     _transport.send(msg);
+    if (msg.hasImage) {
+      // 图片是单帧大负载（原图 base64，可达十几 MB），端到端传输 + 对端解码后回
+      // ack 常常 > 500ms。不套用文本那套即时超时（否则明明已送达却被误标 failed）：
+      // delivered 交给对端 ack（_onAck），failed 交给 channel 断开（_onChannelClosed）
+      // 判定，不拍一个魔法超时数。
+      return;
+    }
     _ackTimers[msg.id] = Timer(_ackTimeout, () {
       _ackTimers.remove(msg.id);
       if (msg.status == SendStatus.pending) {

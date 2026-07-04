@@ -918,6 +918,7 @@ class _ConversationPageState extends State<_ConversationPage> {
       result = await FilePicker.platform.pickFiles(
         type: FileType.image,
         withData: true,
+        allowMultiple: true,
       );
     } catch (e, st) {
       debugPrint('[image] picker threw: $e\n$st');
@@ -927,36 +928,44 @@ class _ConversationPageState extends State<_ConversationPage> {
       debugPrint('[image] picker cancelled / empty');
       return;
     }
-    final file = result.files.single;
-    var bytes = file.bytes;
-    if (bytes == null && file.path != null) {
-      try {
-        bytes = await File(file.path!).readAsBytes();
-      } catch (_) {}
+    var sent = 0;
+    var tooLarge = 0;
+    for (final file in result.files) {
+      var bytes = file.bytes;
+      if (bytes == null && file.path != null) {
+        try {
+          bytes = await File(file.path!).readAsBytes();
+        } catch (_) {}
+      }
+      if (bytes == null) continue;
+      if (bytes.length > _maxImageBytes) {
+        tooLarge++;
+        continue;
+      }
+      final raw = bytes;
+      final mime = _isPngBytes(raw) ? 'image/png' : 'image/jpeg';
+      final msg = widget.chat.prepareImage(
+        toId: widget.recipientId,
+        previewBytes: raw,
+        imageMime: mime,
+      );
+      widget.chat.completeImage(msg, raw, imageMime: mime);
+      sent++;
     }
-    if (bytes == null) return;
-    if (bytes.length > _maxImageBytes) {
-      if (!mounted) return;
+    if (sent > 0) _scrollToBottomAfterSend();
+    if (tooLarge > 0 && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Image too large (${(bytes.length / 1024 / 1024).toStringAsFixed(1)} MB), max 10 MB',
+            tooLarge == 1
+                ? 'Skipped 1 image over 10 MB'
+                : 'Skipped $tooLarge images over 10 MB',
             style: AppFonts.body(size: 13, color: Colors.white),
           ),
           behavior: SnackBarBehavior.floating,
         ),
       );
-      return;
     }
-    final raw = bytes;
-    final mime = _isPngBytes(raw) ? 'image/png' : 'image/jpeg';
-    final msg = widget.chat.prepareImage(
-      toId: widget.recipientId,
-      previewBytes: raw,
-      imageMime: mime,
-    );
-    _scrollToBottomAfterSend();
-    widget.chat.completeImage(msg, raw, imageMime: mime);
   }
 
   Future<void> _pickAndSendFile() async {
