@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:gal/gal.dart';
-import 'package:image/image.dart' as img;
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -34,24 +33,14 @@ Future<void> _openLink(LinkableElement link) async {
   await launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
-const int _maxImageBytes = 10 * 1024 * 1024; // input cap before compression
-const int _maxLongSide = 1280;
-const int _jpegQuality = 80;
+const int _maxImageBytes = 10 * 1024 * 1024; // input cap, sent uncompressed
 
-Uint8List _compressImageSync(Uint8List input) {
-  final decoded = img.decodeImage(input);
-  if (decoded == null) return input;
-  final w = decoded.width, h = decoded.height;
-  img.Image resized = decoded;
-  if (w > _maxLongSide || h > _maxLongSide) {
-    if (w >= h) {
-      resized = img.copyResize(decoded, width: _maxLongSide);
-    } else {
-      resized = img.copyResize(decoded, height: _maxLongSide);
-    }
-  }
-  return Uint8List.fromList(img.encodeJpg(resized, quality: _jpegQuality));
-}
+bool _isPngBytes(Uint8List bytes) =>
+    bytes.length >= 4 &&
+    bytes[0] == 0x89 &&
+    bytes[1] == 0x50 &&
+    bytes[2] == 0x4E &&
+    bytes[3] == 0x47;
 
 String _shortHandle(String id) {
   final s = id.replaceAll('-', '');
@@ -960,21 +949,14 @@ class _ConversationPageState extends State<_ConversationPage> {
       return;
     }
     final raw = bytes;
+    final mime = _isPngBytes(raw) ? 'image/png' : 'image/jpeg';
     final msg = widget.chat.prepareImage(
       toId: widget.recipientId,
       previewBytes: raw,
-      imageMime: 'image/jpeg',
+      imageMime: mime,
     );
     _scrollToBottomAfterSend();
-    Uint8List compressed;
-    try {
-      compressed = await compute(_compressImageSync, raw);
-    } catch (e) {
-      debugPrint('[image] compress failed: $e, sending original');
-      compressed = raw;
-    }
-    if (!mounted) return;
-    widget.chat.completeImage(msg, compressed, imageMime: 'image/jpeg');
+    widget.chat.completeImage(msg, raw, imageMime: mime);
   }
 
   Future<void> _pickAndSendFile() async {
@@ -1157,8 +1139,10 @@ class _ConversationPageState extends State<_ConversationPage> {
     }
     for (final item in reader.items) {
       Uint8List? bytes;
+      var mime = 'image/jpeg';
       if (item.canProvide(Formats.png)) {
         bytes = await _readClipboardFile(item, Formats.png);
+        if (bytes != null) mime = 'image/png';
       }
       if (bytes == null && item.canProvide(Formats.jpeg)) {
         bytes = await _readClipboardFile(item, Formats.jpeg);
@@ -1170,23 +1154,14 @@ class _ConversationPageState extends State<_ConversationPage> {
         return true;
       }
       if (!mounted) return true;
-      // 跟 _pickImage 同路径：先 prepareImage 立即建 bubble，后台 compress 再 completeImage
       final raw = bytes;
       final msg = widget.chat.prepareImage(
         toId: widget.recipientId,
         previewBytes: raw,
-        imageMime: 'image/jpeg',
+        imageMime: mime,
       );
       _scrollToBottomAfterSend();
-      Uint8List compressed;
-      try {
-        compressed = await compute(_compressImageSync, raw);
-      } catch (e) {
-        debugPrint('[paste-image] compress failed: $e, sending original');
-        compressed = raw;
-      }
-      if (!mounted) return true;
-      widget.chat.completeImage(msg, compressed, imageMime: 'image/jpeg');
+      widget.chat.completeImage(msg, raw, imageMime: mime);
       return true;
     }
     return false;
@@ -1512,13 +1487,8 @@ Future<void> _showImageMenu(
   if (selected != 'copy') return;
   final clipboard = SystemClipboard.instance;
   if (clipboard == null) return;
-  final isPng = bytes.length >= 4 &&
-      bytes[0] == 0x89 &&
-      bytes[1] == 0x50 &&
-      bytes[2] == 0x4E &&
-      bytes[3] == 0x47;
   final item = DataWriterItem();
-  item.add(isPng ? Formats.png(bytes) : Formats.jpeg(bytes));
+  item.add(_isPngBytes(bytes) ? Formats.png(bytes) : Formats.jpeg(bytes));
   try {
     await clipboard.write([item]);
   } catch (e) {

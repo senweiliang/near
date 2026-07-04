@@ -16,7 +16,7 @@
 - 发现：`bonsoir` ^5.1.0（mDNS / Bonjour）
 - 传输：`shelf` + `shelf_web_socket` 当 server，`web_socket_channel` 当 client
 - 持久化：`shared_preferences`（仅 myId / myName，不存历史消息）
-- 媒体：`image`（压缩）、`file_picker`、`gal`（保存相册）、`open_filex`、`share_plus`、`super_clipboard`、`flutter_linkify` + `url_launcher`
+- 媒体：`file_picker`、`gal`（保存相册）、`open_filex`、`share_plus`、`super_clipboard`、`flutter_linkify` + `url_launcher`
 - 字体：`google_fonts`（Hanken Grotesk + JetBrains Mono）
 
 ---
@@ -135,8 +135,8 @@ Android 系统在 app `paused` 后约 5 秒就会切断 wifi socket，导致 cha
 
 iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/near_files/{msgId}__{safeName}` 私有目录，再通过 share_plus / open_filex 暴露。
 
-### 图片压缩
-长边 > 1280 时 `image.copyResize`，再 `encodeJpg(quality: 80)`。`prepareImage` + `completeImage` 两步：先用原始 bytes 做预览插入会话，压缩跑完后替换 imageBase64 再真正发送，UI 不阻塞。
+### 图片不压缩
+原图原字节直发，不 resize 不重新编码（历史上曾长边 > 1280 时 `copyResize` + `encodeJpg(quality: 80)`，用户明确要求去掉）。仅保留 `_maxImageBytes`（10 MB）输入体积上限。`imageMime` 靠魔数嗅探实际格式（`_isPngBytes`），不再固定写死 `image/jpeg`。`prepareImage` + `completeImage` 两步调用保留（先用原始 bytes 建 bubble 立即可见，`completeImage` 里再触发真正的 dispatch），但两步之间不再有压缩这个异步环节。
 
 ### 文本 ACK
 500ms 超时（`_ackTimeout`）。短了在弱网误判，长了 UX 上 pending 状态拖太久。
