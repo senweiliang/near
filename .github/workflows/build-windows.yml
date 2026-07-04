@@ -5,7 +5,10 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # windows-latest moved to VS2026/MSVC 14.51 in 2026-06, which hard-errors on
+    # gal's <experimental/coroutine> usage (was just a warning on VS2022). Pin to
+    # windows-2022 until gal ships a fix.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
