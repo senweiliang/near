@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:bonsoir/bonsoir.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -32,13 +33,16 @@ class Chat extends ChangeNotifier {
   final Map<String, String> _svcNameToPeerId = {};
 
   bool autoAcceptFiles = true;
+  bool autoSaveImages = false;
   bool stayConnectedInBackground = false;
+  int _autoSaveSeq = 0;
 
   late final Transport _transport;
   late final Discovery _discovery;
   Directory? _fileCacheDir;
 
   static const String _kAutoAcceptFiles = 'autoAcceptFiles';
+  static const String _kAutoSaveImages = 'autoSaveImages';
   static const String _kStayConnected = 'stayConnectedInBackground';
   static const Duration _ackTimeout = Duration(milliseconds: 500);
   static const MethodChannel _platform = MethodChannel('near/files');
@@ -66,6 +70,7 @@ class Chat extends ChangeNotifier {
       }
       myId = stored;
       autoAcceptFiles = prefs.getBool(_kAutoAcceptFiles) ?? true;
+      autoSaveImages = prefs.getBool(_kAutoSaveImages) ?? false;
       stayConnectedInBackground = prefs.getBool(_kStayConnected) ?? false;
     }
     final base = await getApplicationDocumentsDirectory();
@@ -141,6 +146,47 @@ class Chat extends ChangeNotifier {
       await prefs.setBool(_kAutoAcceptFiles, v);
     }
     notifyListeners();
+  }
+
+  Future<void> setAutoSaveImages(bool v) async {
+    if (autoSaveImages == v) return;
+    autoSaveImages = v;
+    final isTestMode = (Platform.environment['NEAR_TEST_ID'] ?? '').isNotEmpty;
+    if (!isTestMode) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kAutoSaveImages, v);
+    }
+    // 打开时在移动端预取相册权限，避免后续收图时突兀弹窗
+    if (v && (Platform.isAndroid || Platform.isIOS)) {
+      try {
+        if (!await Gal.hasAccess()) await Gal.requestAccess();
+      } catch (e) {
+        debugPrint('[image] gal access request failed: $e');
+      }
+    }
+    notifyListeners();
+  }
+
+  /// 静默把收到的图片落盘：移动端进相册，桌面端写 Downloads。
+  /// 手动保存（fullscreen viewer 的 save 按钮）另有一套带 SnackBar 反馈的路径，
+  /// 这里刻意不弹任何对话框 / 提示，是「自动」的应有之义。
+  Future<void> _autoSaveImage(Uint8List bytes, String? mime) async {
+    final stamp = '${DateTime.now().millisecondsSinceEpoch}-${_autoSaveSeq++}';
+    try {
+      if (Platform.isAndroid || Platform.isIOS) {
+        // 没权限就静默跳过，不在收消息时突然弹权限框（开关打开时已预取过）
+        if (!await Gal.hasAccess()) return;
+        await Gal.putImageBytes(bytes, name: 'near-$stamp');
+      } else {
+        final dir = await getDownloadsDirectory();
+        if (dir == null) return;
+        final ext = mime == 'image/png' ? 'png' : 'jpg';
+        await File('${dir.path}/near-$stamp.$ext').writeAsBytes(bytes);
+      }
+      debugPrint('[image] auto-saved near-$stamp');
+    } catch (e) {
+      debugPrint('[image] auto-save failed: $e');
+    }
   }
 
   Future<void> updateMyName(String name) async {
@@ -285,7 +331,9 @@ class Chat extends ChangeNotifier {
     messages.add(msg);
     notifyListeners();
     if (msg.imageBase64 != null) {
-      _resolveAspect(msg, base64Decode(msg.imageBase64!));
+      final bytes = base64Decode(msg.imageBase64!);
+      _resolveAspect(msg, bytes);
+      if (autoSaveImages) _autoSaveImage(bytes, msg.imageMime);
     }
   }
 

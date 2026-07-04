@@ -212,6 +212,17 @@ class _SettingsPageState extends State<SettingsPage> {
               value: widget.chat.autoAcceptFiles,
               onChanged: (v) => widget.chat.setAutoAcceptFiles(v),
             ),
+            const _RowDivider(),
+            _ToggleRow(
+              label: 'Auto-save images',
+              sub: widget.chat.autoSaveImages
+                  ? (Platform.isAndroid || Platform.isIOS
+                      ? 'Received images are saved to your photos'
+                      : 'Received images are saved to Downloads')
+                  : 'Received images stay in chat until you save them',
+              value: widget.chat.autoSaveImages,
+              onChanged: (v) => widget.chat.setAutoSaveImages(v),
+            ),
             if (Platform.isAndroid) ...[
               const _RowDivider(),
               _ToggleRow(
