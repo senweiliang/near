@@ -1,0 +1,118 @@
+name: Release
+
+# Push a tag like `v1.0.0` to build all platforms and publish a GitHub Release
+# with the artifacts attached. `workflow_dispatch` builds the same artifacts
+# without cutting a release (handy for a dry run).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------- Windows
+  # windows/ scaffold is NOT in the repo — regenerate it on the runner.
+  # Pinned to windows-2022: windows-latest (VS2026/MSVC 14.51) hard-errors on
+  # gal's <experimental/coroutine> usage. Revisit once gal ships a fix.
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter create --platforms=windows --project-name=near .
+      - run: flutter pub get
+      - name: Generate Windows app icon
+        run: dart run flutter_launcher_icons -f flutter_launcher_icons_windows.yaml
+      - run: flutter build windows --release
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "near-windows-x64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: near-windows-x64
+          path: near-windows-x64.zip
+          retention-days: 14
+
+  # ---------------------------------------------------------------- macOS
+  # macos/ IS in the repo (custom Bonjour entitlements + Info.plist), so build
+  # against it directly — do NOT flutter create over the scaffold. The build is
+  # unsigned / un-notarised; first launch needs right-click → Open on the user's
+  # side (see the release notes below).
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+      - run: flutter config --enable-macos-desktop
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: Package
+        run: |
+          cd build/macos/Build/Products/Release
+          ditto -c -k --keepParent near.app "$GITHUB_WORKSPACE/near-macos.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: near-macos
+          path: near-macos.zip
+          retention-days: 14
+
+  # ---------------------------------------------------------------- Android
+  # android/ IS in the repo. Release build is debug-signed (see app/build.gradle.kts),
+  # so the APK installs directly — no keystore secrets needed for a GitHub Release.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk near-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: near-android
+          path: near-android.apk
+          retention-days: 14
+
+  # ---------------------------------------------------------------- Release
+  release:
+    needs: [windows, macos, android]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: List artifacts
+        run: find dist -type f
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Peer-to-peer chat for your local network — no server, no account, no history.
+
+            ### Install
+            - **Windows** — download `near-windows-x64.zip`, unzip anywhere, run `near.exe`.
+            - **macOS** — download `near-macos.zip`, unzip. This build is unsigned, so the first launch needs a right-click → **Open** (or run `xattr -dr com.apple.quarantine near.app`).
+            - **Android** — download `near-android.apk` and allow installs from your browser or files app. Signed with a debug key.
+            - **iOS** — not distributed yet. Build from source: `flutter run -d ios`.

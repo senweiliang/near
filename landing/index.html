@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Near — a quiet room on this network</title>
+<meta name="description" content="Near finds the people on your local network and lets you send text, images and files straight to them. No sign-up, no server, no history. macOS, iOS, Android and Windows.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-page: #f4f5f7;
+    --bg-app: #ffffff;
+    --surface: #f7f8fa;
+    --surface-2: #f0f2f5;
+    --line: #e8eaef;
+    --line-2: #d8dce3;
+    --ink: #0f1216;
+    --ink-2: #383d46;
+    --ink-3: #6d7280;
+    --ink-faint: #b6bac3;
+    --accent: #4a6e87;       /* slate teal */
+    --accent-soft: #e8eef3;
+    --accent-deep: #36546a;
+    --presence: #5fb288;
+
+    --font-body: 'Hanken Grotesk', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+    --wrap: 1120px;
+    --pad-x: clamp(1.25rem, 5vw, 2.5rem);
+    --radius: 14px;
+    --radius-lg: 20px;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    font-family: var(--font-body);
+    background: var(--bg-page);
+    color: var(--ink);
+    line-height: 1.6;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+  a { color: inherit; text-decoration: none; }
+  h1, h2, h3 { margin: 0; }
+  p { margin: 0; }
+  svg { display: block; }
+  button { font-family: inherit; }
+
+  ::selection { background: var(--accent-soft); color: var(--accent-deep); }
+
+  .skip {
+    position: absolute; left: -9999px; top: 0;
+    background: var(--ink); color: #fff; padding: 10px 16px;
+    border-radius: 0 0 10px 0; z-index: 100;
+    font-family: var(--font-mono); font-size: 13px;
+  }
+  .skip:focus { left: 0; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: var(--wrap);
+    margin-inline: auto;
+    padding-inline: var(--pad-x);
+  }
+
+  /* mono eyebrow / labels — the app's own "machine info" register */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .eyebrow .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--presence);
+    box-shadow: 0 0 0 0 rgba(95,178,136,0.5);
+  }
+  .mono { font-family: var(--font-mono); }
+
+  /* Chinese text: mono machine-strings keep their english; translated prose
+     falls back to Noto Sans SC and shouldn't wear latin-mono tracking */
+  html[data-lang="zh"] .eyebrow,
+  html[data-lang="zh"] .step__n { letter-spacing: 0.05em; }
+  html[data-lang="zh"] .card__ey,
+  html[data-lang="zh"] .card__ey { letter-spacing: 0.04em; }
+
+  /* ============ NAV ============ */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(244,245,247,0.72);
+    backdrop-filter: saturate(1.2) blur(14px);
+    -webkit-backdrop-filter: saturate(1.2) blur(14px);
+    border-bottom: 1px solid transparent;
+    transition: border-color .25s ease, background .25s ease;
+  }
+  .nav.is-stuck {
+    border-bottom-color: var(--line);
+    background: rgba(255,255,255,0.78);
+  }
+  .nav__inner {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 64px;
+  }
+  .brand {
+    font-size: 1.3rem; font-weight: 700; letter-spacing: -0.035em;
+    color: var(--ink);
+  }
+  .brand .dot { color: var(--accent); }
+  .nav__links { display: flex; align-items: center; gap: 4px; }
+  .nav__links a {
+    font-family: var(--font-mono);
+    font-size: 0.78rem; letter-spacing: 0.02em;
+    color: var(--ink-3);
+    padding: 8px 12px; border-radius: 9px;
+    transition: color .18s ease, background .18s ease;
+  }
+  .nav__links a:hover { color: var(--ink); background: var(--surface-2); }
+  .lang-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem; letter-spacing: 0.02em;
+    color: var(--ink-3);
+    padding: 7px 12px; border-radius: 9px;
+    background: transparent; border: 1px solid var(--line-2); cursor: pointer;
+    transition: color .18s ease, background .18s ease, border-color .18s ease;
+  }
+  .lang-toggle:hover { color: var(--ink); background: var(--surface); border-color: var(--ink-faint); }
+  .lang-toggle .lt-label { min-width: 16px; text-align: center; }
+  .nav__gh {
+    display: inline-flex; align-items: center; gap: 7px;
+    color: var(--ink) !important;
+    background: transparent;
+    border: 1px solid var(--line-2);
+  }
+  .nav__gh:hover { background: var(--surface) !important; border-color: var(--ink-faint); }
+
+  /* ============ BUTTONS ============ */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+    font-family: var(--font-body);
+    font-size: 0.95rem; font-weight: 600; letter-spacing: -0.01em;
+    padding: 13px 22px;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: transform .16s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
+    white-space: nowrap;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn--primary {
+    background: var(--accent); color: #fff;
+    box-shadow: 0 1px 2px rgba(15,18,22,0.12), 0 8px 20px rgba(74,110,135,0.22);
+  }
+  .btn--primary:hover { background: var(--accent-deep); }
+  .btn--ghost {
+    background: var(--bg-app); color: var(--ink);
+    border-color: var(--line-2);
+  }
+  .btn--ghost:hover { border-color: var(--ink-faint); background: var(--surface); }
+
+  /* ============ HERO ============ */
+  .hero { position: relative; padding-top: clamp(3rem, 7vw, 5.5rem); padding-bottom: clamp(3.5rem, 8vw, 6rem); }
+  .hero__grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
+    gap: clamp(2rem, 5vw, 4.5rem);
+    align-items: center;
+  }
+  .hero__wordmark {
+    font-size: clamp(3.4rem, 9vw, 5.6rem);
+    font-weight: 700;
+    letter-spacing: -0.045em;
+    line-height: 0.92;
+    color: var(--ink);
+    margin: 18px 0 20px;
+    font-family: 'Hanken Grotesk', sans-serif;
+  }
+  .hero__wordmark .dot { color: var(--accent); }
+  .hero h1 {
+    font-size: clamp(1.55rem, 3vw, 2.15rem);
+    font-weight: 600;
+    letter-spacing: -0.028em;
+    line-height: 1.14;
+    color: var(--ink);
+    max-width: 20ch;
+  }
+  .hero__lead {
+    margin-top: 20px;
+    font-size: clamp(1.02rem, 1.4vw, 1.15rem);
+    color: var(--ink-3);
+    max-width: 42ch;
+    line-height: 1.62;
+  }
+  .hero__tagline {
+    margin-top: 22px;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--ink-3);
+    letter-spacing: 0.02em;
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    background: var(--bg-app);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    max-width: 100%;
+  }
+  .hero__tagline b { color: var(--accent-deep); font-weight: 500; }
+  .hero__cta {
+    margin-top: 30px;
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  }
+  .hero__note {
+    margin-top: 18px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+    letter-spacing: 0.01em;
+  }
+  .hero__note b { color: var(--ink-3); font-weight: 500; }
+
+  /* faint dot-grid behind the hero panel — quiet ambient texture */
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background-image: radial-gradient(circle at center, var(--line-2) 1px, transparent 1.4px);
+    background-size: 26px 26px;
+    -webkit-mask-image: radial-gradient(ellipse 70% 60% at 82% 42%, #000 0%, transparent 72%);
+    mask-image: radial-gradient(ellipse 70% 60% at 82% 42%, #000 0%, transparent 72%);
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .hero .wrap { position: relative; z-index: 1; }
+
+  /* --- the live "room" panel: Near's real UI, discovering peers --- */
+  .room {
+    background: var(--bg-app);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow:
+      0 1px 0 rgba(15,18,22,0.02),
+      0 30px 60px -30px rgba(15,18,22,0.28),
+      0 12px 24px -18px rgba(15,18,22,0.16);
+    overflow: hidden;
+    max-width: 420px;
+    margin-inline: auto;
+    width: 100%;
+  }
+  .room__bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .room__dots { display: flex; gap: 6px; }
+  .room__dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--line-2); }
+  .room__listening {
+    margin-left: 6px;
+    font-family: var(--font-mono); font-size: 0.68rem;
+    color: var(--ink-3); letter-spacing: 0.02em;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .room__listening .live {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--presence);
+    animation: pulse 2.4s ease-out infinite;
+  }
+  .room__body { padding: 14px 14px 16px; }
+
+  .meta-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    display: flex; gap: 12px; align-items: center;
+    margin-bottom: 14px;
+  }
+  .stack { display: flex; }
+  .stack .mini {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2px solid var(--bg-app);
+    margin-left: -8px;
+    background: var(--surface-2); color: var(--ink-2);
+    display: grid; place-items: center;
+    font-size: 10.5px; font-weight: 600;
+  }
+  .stack .mini:first-child { margin-left: 0; }
+  .stack .mini.you { background: var(--accent); color: #fff; }
+  .meta-card .t1 { font-size: 0.9rem; font-weight: 600; color: var(--ink); }
+  .meta-card .t1 b { color: var(--accent-deep); font-weight: 700; }
+  .meta-card .t2 {
+    font-family: var(--font-mono); font-size: 0.68rem;
+    color: var(--ink-3); margin-top: 2px; letter-spacing: 0.01em;
+  }
+
+  .sec-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font-family: var(--font-mono); font-size: 0.65rem;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-3);
+    padding: 4px 8px 10px;
+  }
+  .sec-head b { color: var(--ink-2); font-weight: 500; }
+
+  .peer {
+    display: grid; grid-template-columns: 40px 1fr auto;
+    gap: 12px; align-items: center;
+    padding: 9px 10px; border-radius: 12px;
+    min-width: 0;
+  }
+  .peer > div { min-width: 0; }
+  .peer.is-group { background: var(--accent-soft); }
+  .av {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--surface-2); color: var(--ink-2);
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 15px;
+    position: relative; flex-shrink: 0;
+  }
+  .av.you { background: var(--accent); color: #fff; }
+  .av.group { background: var(--accent-soft); color: var(--accent-deep); }
+  .av .pres {
+    position: absolute; right: -1px; bottom: -1px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--presence); border: 2.5px solid var(--bg-app);
+  }
+  .peer-name { font-weight: 600; font-size: 0.95rem; letter-spacing: -0.01em; color: var(--ink); }
+  .peer-name .handle {
+    font-family: var(--font-mono); font-weight: 400;
+    font-size: 0.72rem; color: var(--ink-3); margin-left: 6px; letter-spacing: 0.01em;
+  }
+  .peer-meta {
+    font-size: 0.82rem; color: var(--ink-3); margin-top: 1px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .peer-meta.attn { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink-3); }
+  .badge {
+    background: var(--accent); color: #fff;
+    font-size: 0.72rem; font-weight: 700;
+    min-width: 20px; text-align: center;
+    padding: 2px 7px; border-radius: 9px;
+  }
+
+  /* discovery stagger — peers arrive one by one, as they're found */
+  .discover { opacity: 0; transform: translateY(8px); animation: discoverIn .55s cubic-bezier(.2,.7,.2,1) forwards; }
+  .d1 { animation-delay: .35s; }
+  .d2 { animation-delay: .60s; }
+  .d3 { animation-delay: .85s; }
+  .d4 { animation-delay: 1.10s; }
+  .d5 { animation-delay: 1.35s; }
+
+  @keyframes discoverIn { to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(95,178,136,0.45); }
+    70% { box-shadow: 0 0 0 7px rgba(95,178,136,0); }
+    100% { box-shadow: 0 0 0 0 rgba(95,178,136,0); }
+  }
+
+  /* ============ SECTION SCAFFOLD ============ */
+  .band { padding-block: clamp(4.5rem, 9vw, 7.5rem); }
+  .band--line { border-top: 1px solid var(--line); }
+  .section-head { max-width: 62ch; }
+  .section-head .eyebrow { margin-bottom: 16px; }
+  .section-head h2 {
+    font-size: clamp(1.8rem, 3.6vw, 2.6rem);
+    font-weight: 700; letter-spacing: -0.032em; line-height: 1.08;
+    color: var(--ink);
+  }
+  .section-head p {
+    margin-top: 16px; font-size: 1.08rem; color: var(--ink-3); max-width: 52ch;
+  }
+
+  /* manifesto strip */
+  .manifesto { text-align: center; }
+  .manifesto p {
+    font-size: clamp(1.4rem, 3.4vw, 2.3rem);
+    font-weight: 500; letter-spacing: -0.03em; line-height: 1.28;
+    color: var(--ink);
+    max-width: 22ch; margin-inline: auto;
+  }
+  .manifesto p b { color: var(--accent); font-weight: 600; }
+  .manifesto .eyebrow { justify-content: center; display: inline-flex; margin-bottom: 22px; }
+
+  /* ============ FEATURES (bento) ============ */
+  .features { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-top: 48px; }
+  .card {
+    background: var(--bg-app);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 26px 24px;
+    transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease;
+  }
+  .card:hover {
+    border-color: var(--line-2);
+    transform: translateY(-2px);
+    box-shadow: 0 14px 30px -22px rgba(15,18,22,0.22);
+  }
+  .card.span-3 { grid-column: span 3; }
+  .card.span-2 { grid-column: span 2; }
+  .card.span-6 { grid-column: span 6; }
+  .card__ico {
+    width: 40px; height: 40px; border-radius: 11px;
+    background: var(--accent-soft); color: var(--accent-deep);
+    display: grid; place-items: center;
+    margin-bottom: 18px;
+  }
+  .card__ey { font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); }
+  .card h3 {
+    font-size: 1.2rem; font-weight: 600; letter-spacing: -0.018em;
+    color: var(--ink); margin: 6px 0 9px;
+  }
+  .card p { color: var(--ink-3); font-size: 0.96rem; line-height: 1.58; }
+  .card p code {
+    font-family: var(--font-mono); font-size: 0.84em;
+    background: var(--surface-2); color: var(--accent-deep);
+    padding: 1px 6px; border-radius: 5px;
+  }
+  /* wide "no record" card, quiet emphasis */
+  .card--quiet {
+    background: var(--ink);
+    color: #fff; border-color: var(--ink);
+    display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 24px; align-items: center;
+  }
+  .card--quiet .card__ico { background: rgba(255,255,255,0.08); color: #fff; margin-bottom: 0; }
+  .card--quiet h3 { color: #fff; }
+  .card--quiet p { color: rgba(255,255,255,0.62); }
+  .card--quiet:hover { border-color: var(--ink); transform: none; box-shadow: none; }
+  .card--quiet .qtext { max-width: 52ch; }
+  .card--quiet .qtag {
+    font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.06em;
+    color: rgba(255,255,255,0.5);
+    border: 1px solid rgba(255,255,255,0.16); border-radius: 999px;
+    padding: 7px 14px; white-space: nowrap;
+  }
+
+  /* ============ HOW IT WORKS ============ */
+  .flow { margin-top: 46px; }
+  .wire {
+    display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 18px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 22px clamp(20px, 4vw, 34px); margin-bottom: 42px;
+  }
+  .node {
+    display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center;
+  }
+  .node .chip {
+    width: 54px; height: 54px; border-radius: 15px;
+    display: grid; place-items: center; color: #fff; background: var(--accent);
+    box-shadow: 0 8px 18px -10px rgba(74,110,135,0.5);
+  }
+  .node.b .chip { background: var(--ink-2); box-shadow: 0 8px 18px -10px rgba(15,18,22,0.4); }
+  .node .lbl { font-weight: 600; font-size: 0.9rem; }
+  .node .sub { font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-3); }
+  .link {
+    position: relative; height: 2px; background: var(--line-2); border-radius: 2px;
+  }
+  .link::after {
+    content: ''; position: absolute; top: 50%; left: 0;
+    width: 9px; height: 9px; margin-top: -4.5px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px rgba(74,110,135,0.14);
+    animation: travel 2.6s cubic-bezier(.55,0,.45,1) infinite;
+  }
+  .link .caption {
+    position: absolute; top: -26px; left: 50%; transform: translateX(-50%);
+    font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-3);
+    letter-spacing: 0.04em; white-space: nowrap;
+  }
+  @keyframes travel { 0% { left: 0; } 50% { left: 100%; } 50.01% { left: 100%; } 100% { left: 0; } }
+
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .step {
+    background: var(--bg-app); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 24px 22px;
+  }
+  .step__n {
+    font-family: var(--font-mono); font-size: 0.75rem; font-weight: 500;
+    color: var(--accent); letter-spacing: 0.08em;
+    display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+  }
+  .step__n::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+  .step h3 { font-size: 1.08rem; font-weight: 600; letter-spacing: -0.015em; margin-bottom: 8px; }
+  .step p { color: var(--ink-3); font-size: 0.92rem; line-height: 1.56; }
+  .step p code {
+    font-family: var(--font-mono); font-size: 0.82em;
+    background: var(--surface-2); color: var(--accent-deep); padding: 1px 5px; border-radius: 5px;
+  }
+
+  /* ============ DOWNLOAD ============ */
+  .get { text-align: center; }
+  .get .section-head { margin-inline: auto; text-align: center; }
+  .get .section-head .eyebrow { justify-content: center; }
+  .get .section-head p { margin-inline: auto; }
+  .platforms {
+    margin-top: 44px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+    text-align: left;
+  }
+  .plat {
+    background: var(--bg-app); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 26px 22px; display: flex; flex-direction: column; justify-content: center; gap: 14px;
+    min-height: 128px;
+    transition: border-color .2s ease;
+  }
+  .plat:hover { border-color: var(--line-2); }
+  .plat__top { display: flex; align-items: center; justify-content: space-between; }
+  .plat__ico { color: var(--ink-2); }
+  .tag {
+    font-family: var(--font-mono); font-size: 0.62rem; font-weight: 500;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 4px 9px; border-radius: 999px;
+  }
+  .tag--ready { background: rgba(95,178,136,0.14); color: #3f7d5b; }
+  .tag--soon { background: var(--surface-2); color: var(--ink-3); }
+  .plat__name { font-weight: 600; font-size: 1.02rem; letter-spacing: -0.015em; }
+  .plat__sub { font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink-3); margin-top: 2px; }
+  .plat__link {
+    margin-top: auto; font-family: var(--font-mono); font-size: 0.74rem; font-weight: 500;
+    color: var(--accent); display: inline-flex; align-items: center; gap: 6px;
+  }
+  .plat:hover .plat__link { color: var(--accent-deep); }
+  .plat__link .arw { transition: transform .18s ease; }
+  .plat:hover .plat__link .arw { transform: translateX(3px); }
+
+  .get__cta { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+
+  .source {
+    margin-top: 40px;
+    background: var(--ink); color: #fff;
+    border-radius: var(--radius-lg); overflow: hidden;
+    max-width: 720px; margin-inline: auto; text-align: left;
+  }
+  .source__head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 13px 18px; border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .source__head .fdots { display: flex; gap: 6px; }
+  .source__head .fdots i { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,0.16); }
+  .source__head span {
+    font-family: var(--font-mono); font-size: 0.7rem; color: rgba(255,255,255,0.5);
+    margin-left: 4px; letter-spacing: 0.02em;
+  }
+  .source pre {
+    margin: 0; padding: 20px 22px;
+    font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.85;
+    color: rgba(255,255,255,0.86); overflow-x: auto;
+  }
+  .source pre .c { color: rgba(255,255,255,0.4); }
+
+  /* ============ FOOTER ============ */
+  .footer { border-top: 1px solid var(--line); padding-block: 48px; }
+  .footer__grid { display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; flex-wrap: wrap; }
+  .footer .brand { font-size: 1.15rem; }
+  .footer__tag { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-3); margin-top: 10px; letter-spacing: 0.02em; }
+  .footer__meta { font-size: 0.72rem; color: var(--ink-faint); margin-top: 6px; letter-spacing: 0.02em; }
+  .footer__links { display: flex; flex-direction: column; gap: 8px; font-family: var(--font-mono); font-size: 0.78rem; }
+  .footer__links a { color: var(--ink-3); }
+  .footer__links a:hover { color: var(--ink); }
+
+  /* ============ REVEAL ============ */
+  .reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1); }
+  .reveal.is-visible { opacity: 1; transform: none; }
+  .reveal.delay-1 { transition-delay: .08s; }
+  .reveal.delay-2 { transition-delay: .16s; }
+  .reveal.delay-3 { transition-delay: .24s; }
+
+  /* ============ RESPONSIVE ============ */
+  @media (max-width: 940px) {
+    .hero__grid { grid-template-columns: 1fr; gap: 40px; }
+    .hero__copy { max-width: 560px; }
+    .hero::before { -webkit-mask-image: radial-gradient(ellipse 90% 40% at 50% 88%, #000, transparent 75%); mask-image: radial-gradient(ellipse 90% 40% at 50% 88%, #000, transparent 75%); opacity: 0.35; }
+    .features { grid-template-columns: repeat(2, 1fr); }
+    .card.span-3, .card.span-2 { grid-column: span 1; }
+    .card.span-6 { grid-column: span 2; }
+    .steps { grid-template-columns: 1fr; }
+    .platforms { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 620px) {
+    .nav__hide-sm { display: none; }
+    .features { grid-template-columns: 1fr; }
+    .card.span-6 { grid-column: span 1; }
+    .card--quiet { grid-template-columns: 1fr; gap: 16px; }
+    .platforms { grid-template-columns: 1fr; }
+    .wire { grid-template-columns: 1fr; gap: 22px; }
+    .link { height: 40px; width: 2px; justify-self: center; }
+    .link::after { animation: travelV 2.6s cubic-bezier(.55,0,.45,1) infinite; left: 50%; margin-left: -4.5px; }
+    .link .caption { top: 50%; left: auto; right: -8px; transform: translate(100%, -50%); }
+    .footer__grid { flex-direction: column; }
+  }
+  @keyframes travelV { 0% { top: 0; } 50% { top: 100%; } 50.01% { top: 100%; } 100% { top: 0; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+    .reveal { opacity: 1; transform: none; }
+    .discover { opacity: 1; transform: none; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#get" data-i18n="skip">Skip to download</a>
+
+<!-- ================= NAV ================= -->
+<header class="nav" id="nav">
+  <div class="wrap nav__inner">
+    <a class="brand" href="#top" aria-label="Near, home">Near<span class="dot">.</span></a>
+    <nav class="nav__links" aria-label="Primary">
+      <a class="nav__hide-sm" href="#features" data-i18n="nav.features">features</a>
+      <a class="nav__hide-sm" href="#how" data-i18n="nav.how">how it works</a>
+      <a href="#get" data-i18n="nav.get">get it</a>
+      <button class="lang-toggle" id="langToggle" type="button" aria-label="切换到中文">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 0 20 15.3 15.3 0 0 1 0-20"/></svg>
+        <span class="lt-label">中</span>
+      </button>
+      <a class="nav__gh" href="https://github.com/senweiliang/near" target="_blank" rel="noopener">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.53-1.34-1.3-1.7-1.3-1.7-1.06-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.1-.76.4-1.27.74-1.56-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.5 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.25 5.69.41.36.78 1.05.78 2.12v3.14c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ================= HERO ================= -->
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero__grid">
+        <div class="hero__copy">
+          <span class="eyebrow reveal"><span class="dot"></span><span data-i18n="hero.eyebrow">no accounts · no server · no record</span></span>
+          <div class="hero__wordmark reveal delay-1">Near<span class="dot">.</span></div>
+          <h1 class="reveal delay-1" data-i18n="hero.h1">A quiet room on this network.</h1>
+          <p class="hero__lead reveal delay-2" data-i18n="hero.lead">Near finds the people around you and lets you send messages, photos and any file straight to them — across Mac, Windows, Android and iPhone. No sign-up, no accounts, no history.</p>
+          <div class="hero__cta reveal delay-3">
+            <a class="btn btn--primary" href="#get">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+              <span data-i18n="hero.cta1">Get Near</span>
+            </a>
+          </div>
+          <p class="hero__note reveal delay-3" data-i18n="hero.note"><b>Free &amp; open source.</b> macOS · iOS · Android · Windows.</p>
+        </div>
+
+        <!-- live room panel: Near's real UI, resolving peers one by one -->
+        <div class="hero__panel reveal delay-2">
+          <div class="room" role="img" aria-label="The Near app showing the people nearby: Everyone here, Mei, Kai, Riku and Tessa.">
+            <div class="room__bar" aria-hidden="true">
+              <div class="room__dots"><i></i><i></i><i></i></div>
+              <span class="room__listening"><span class="live"></span>on this network</span>
+            </div>
+            <div class="room__body" aria-hidden="true">
+              <div class="meta-card discover d1">
+                <div class="stack">
+                  <div class="mini you">A</div>
+                  <div class="mini">M</div>
+                  <div class="mini">K</div>
+                  <div class="mini">R</div>
+                  <div class="mini">T</div>
+                </div>
+                <div>
+                  <div class="t1"><b>4 nearby</b> on this network</div>
+                  <div class="t2">no server · no accounts · no record</div>
+                </div>
+              </div>
+
+              <div class="sec-head discover d1"><span>Conversations</span><b>5</b></div>
+
+              <div class="peer is-group discover d1">
+                <div class="av group">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>
+                </div>
+                <div>
+                  <div class="peer-name">Everyone here</div>
+                  <div class="peer-meta">4 in the room · open to all</div>
+                </div>
+              </div>
+
+              <div class="peer discover d2">
+                <div class="av">M<span class="pres"></span></div>
+                <div>
+                  <div class="peer-name">Mei <span class="handle">@b291</span></div>
+                  <div class="peer-meta">sounds good — sending the file now</div>
+                </div>
+                <div class="badge">2</div>
+              </div>
+
+              <div class="peer discover d3">
+                <div class="av">K<span class="pres"></span></div>
+                <div>
+                  <div class="peer-name">Kai <span class="handle">@e0d7</span></div>
+                  <div class="peer-meta attn">[Image]</div>
+                </div>
+              </div>
+
+              <div class="peer discover d4">
+                <div class="av">R<span class="pres"></span></div>
+                <div>
+                  <div class="peer-name">Riku <span class="handle">@5fb3</span></div>
+                  <div class="peer-meta">sent over the trip photos</div>
+                </div>
+              </div>
+
+              <div class="peer discover d5">
+                <div class="av">T<span class="pres"></span></div>
+                <div>
+                  <div class="peer-name">Tessa <span class="handle">@1c4a</span></div>
+                  <div class="peer-meta attn">[near-notes.pdf]</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= MANIFESTO ================= -->
+  <section class="band band--line manifesto">
+    <div class="wrap">
+      <span class="eyebrow reveal"><span class="dot"></span><span data-i18n="mani.eyebrow">the whole idea</span></span>
+      <p class="reveal delay-1" data-i18n="mani.body">No sign-up. No server. No history. Just <b>the people already around you</b>, and a place to talk.</p>
+    </div>
+  </section>
+
+  <!-- ================= FEATURES ================= -->
+  <section class="band band--line" id="features">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <span class="eyebrow"><span class="dot"></span><span data-i18n="feat.eyebrow">what it does</span></span>
+        <h2 data-i18n="feat.h2">Made for sharing with people nearby.</h2>
+        <p data-i18n="feat.desc">No cloud, no middle-man — whatever you send goes straight from your device to theirs.</p>
+      </div>
+
+      <div class="features">
+        <!-- send any file -->
+        <article class="card span-3 reveal">
+          <div class="card__ico">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/></svg>
+          </div>
+          <div class="card__ey" data-i18n="card.send.ey">send anything</div>
+          <h3 data-i18n="card.send.h3">Send any file, not just photos</h3>
+          <p data-i18n="card.send.p">Messages, photos, and any file at all — documents, videos, zip archives — go straight to the person you pick, at full quality.</p>
+        </article>
+
+        <!-- cross-platform -->
+        <article class="card span-3 reveal delay-1">
+          <div class="card__ico">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 18H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v3"/><rect x="14" y="12" width="8" height="10" rx="2"/><path d="M18 20h.01"/></svg>
+          </div>
+          <div class="card__ey" data-i18n="card.cross.ey">any device to any device</div>
+          <h3 data-i18n="card.cross.h3">Mac to phone, phone to PC</h3>
+          <p data-i18n="card.cross.p">Send freely between Mac, Windows, Android and iPhone. A file from your laptop lands on someone's phone just the same.</p>
+        </article>
+
+        <!-- auto-receive -->
+        <article class="card span-2 reveal">
+          <div class="card__ico">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+          </div>
+          <div class="card__ey" data-i18n="card.auto.ey">hands-off</div>
+          <h3 data-i18n="card.auto.h3">Files arrive on their own</h3>
+          <p data-i18n="card.auto.p">Switch on auto-accept and what people send saves straight to your device — files to Downloads, photos to your gallery. Nothing to tap.</p>
+        </article>
+
+        <!-- discovery -->
+        <article class="card span-2 reveal delay-1">
+          <div class="card__ico">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14 0"/><path d="M1.5 9a16 16 0 0 1 21 0"/><path d="M8.5 16.1a6 6 0 0 1 7 0"/><circle cx="12" cy="20" r="1"/></svg>
+          </div>
+          <div class="card__ey" data-i18n="card.disc.ey">discovery</div>
+          <h3 data-i18n="card.disc.h3">Everyone just shows up</h3>
+          <p data-i18n="card.disc.p">Open Near and everyone on the same network appears — no codes, no adding contacts.</p>
+        </article>
+
+        <!-- group + private -->
+        <article class="card span-2 reveal delay-2">
+          <div class="card__ico">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </div>
+          <div class="card__ey" data-i18n="card.room.ey">room + 1:1</div>
+          <h3 data-i18n="card.room.h3">The whole room, or just one</h3>
+          <p data-i18n="card.room.p">Send to everyone at once, or open a private thread with any one person.</p>
+        </article>
+
+        <!-- no record (quiet, wide) -->
+        <article class="card span-6 card--quiet reveal">
+          <div style="display:flex; gap:20px; align-items:center;" class="qtext">
+            <div class="card__ico">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 10 8 10 8a13.2 13.2 0 0 1-1.67 2.68"/><path d="M6.6 6.6A13.5 13.5 0 0 0 2 12s3 8 10 8a9 9 0 0 0 5.4-1.6"/><path d="m2 2 20 20"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+            </div>
+            <div>
+              <div class="card__ey" style="color:rgba(255,255,255,0.45)" data-i18n="card.rec.ey">no record</div>
+              <h3 data-i18n="card.rec.h3">Gone when you close it</h3>
+              <p data-i18n="card.rec.p">Near keeps no history. Close the app and the conversation is gone — never saved anywhere, never sent to a server.</p>
+            </div>
+          </div>
+          <span class="qtag" data-i18n="card.rec.tag">nothing is saved</span>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= HOW IT WORKS ================= -->
+  <section class="band band--line" id="how">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <span class="eyebrow"><span class="dot"></span><span data-i18n="how.eyebrow">how it works</span></span>
+        <h2 data-i18n="how.h2">Three steps, no accounts in sight.</h2>
+        <p data-i18n="how.desc">Open the app — it handles the finding, connecting and sending for you.</p>
+      </div>
+
+      <div class="flow">
+        <div class="wire reveal delay-1" aria-hidden="true">
+          <div class="node a">
+            <div class="chip">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+            </div>
+            <div class="lbl" data-i18n="how.you">You</div>
+            <div class="sub">@7f3a</div>
+          </div>
+          <div class="link"><span class="caption">direct · no server</span></div>
+          <div class="node b">
+            <div class="chip">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8M12 18v4"/></svg>
+            </div>
+            <div class="lbl" data-i18n="how.peer">Peer</div>
+            <div class="sub">@b291</div>
+          </div>
+        </div>
+
+        <div class="steps">
+          <article class="step reveal">
+            <div class="step__n" data-i18n="how.s1.n">01 · discover</div>
+            <h3 data-i18n="how.s1.h3">Everyone shows up</h3>
+            <p data-i18n="how.s1.p">Open Near and everyone else on the same Wi-Fi appears on their own — no codes to share, no contacts to add.</p>
+          </article>
+          <article class="step reveal delay-1">
+            <div class="step__n" data-i18n="how.s2.n">02 · connect</div>
+            <h3 data-i18n="how.s2.h3">A direct line</h3>
+            <p data-i18n="how.s2.p">The moment you both open it, your devices link up straight to each other — nothing in the middle, nothing to set up.</p>
+          </article>
+          <article class="step reveal delay-2">
+            <div class="step__n" data-i18n="how.s3.n">03 · talk</div>
+            <h3 data-i18n="how.s3.h3">Send anything, keep nothing</h3>
+            <p data-i18n="how.s3.p">Text, images and files go straight to the other side. Close the app and it's all gone — nothing saved, nothing uploaded.</p>
+          </article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= DOWNLOAD ================= -->
+  <section class="band band--line get" id="get">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <span class="eyebrow"><span class="dot"></span><span data-i18n="get.eyebrow">get it</span></span>
+        <h2 data-i18n="get.h2">Bring Near to your network.</h2>
+        <p data-i18n="get.desc">Free and open, for every device you already use.</p>
+      </div>
+
+      <div class="platforms">
+        <div class="plat reveal">
+          <span class="plat__ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10 4.6v6.9H3zM11 4.45 21 3v8.5H11zM3 12.5h7v6.9L3 18.5zM11 12.5h10V21l-10-1.45z"/></svg></span>
+          <div class="plat__name">Windows</div>
+        </div>
+        <div class="plat reveal delay-1">
+          <span class="plat__ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 3.5c.1 1.2-.4 2.3-1.1 3.1-.7.9-1.9 1.5-3 1.4-.1-1.1.4-2.3 1.1-3.1.8-.8 2-1.4 3-1.4Zm3.4 15c-.5 1.2-.8 1.7-1.4 2.7-.9 1.4-2.2 3.2-3.8 3.2-1.4 0-1.8-.9-3.7-.9s-2.3.9-3.7.9c-1.6 0-2.8-1.6-3.7-3-2.6-3.9-2.8-8.5-1.3-11 1.1-1.8 2.8-2.8 4.4-2.8 1.6 0 2.7 1 4 1 1.3 0 2.1-1 4-1 1.4 0 2.9.8 4 2.1-3.5 1.9-3 6.9.9 8.8Z"/></svg></span>
+          <div class="plat__name">macOS</div>
+        </div>
+        <div class="plat reveal delay-2">
+          <span class="plat__ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 9h12v9a2 2 0 0 1-2 2h-.5v2.5a1.25 1.25 0 0 1-2.5 0V20h-2v2.5a1.25 1.25 0 0 1-2.5 0V20H8a2 2 0 0 1-2-2zM3.5 9.5A1.25 1.25 0 0 1 4.75 8 1.25 1.25 0 0 1 6 9.25v5.5a1.25 1.25 0 0 1-2.5 0zm14.75-1.25A1.25 1.25 0 0 1 20.5 9.5v5.25a1.25 1.25 0 0 1-2.5 0v-5.5a1.25 1.25 0 0 1 1.25-1.25ZM8 7c-.2-2 .8-3.7 2.2-4.7l-.9-1.3.7-.5.9 1.4c.9-.4 1.4-.4 2.2 0l.9-1.4.7.5-.9 1.3C16 2.9 16.9 4.8 16 7zm2-1.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5m4 0a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5"/></svg></span>
+          <div class="plat__name">Android</div>
+        </div>
+        <div class="plat reveal delay-3">
+          <span class="plat__ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 3.5c.1 1.2-.4 2.3-1.1 3.1-.7.9-1.9 1.5-3 1.4-.1-1.1.4-2.3 1.1-3.1.8-.8 2-1.4 3-1.4Zm3.4 15c-.5 1.2-.8 1.7-1.4 2.7-.9 1.4-2.2 3.2-3.8 3.2-1.4 0-1.8-.9-3.7-.9s-2.3.9-3.7.9c-1.6 0-2.8-1.6-3.7-3-2.6-3.9-2.8-8.5-1.3-11 1.1-1.8 2.8-2.8 4.4-2.8 1.6 0 2.7 1 4 1 1.3 0 2.1-1 4-1 1.4 0 2.9.8 4 2.1-3.5 1.9-3 6.9.9 8.8Z"/></svg></span>
+          <div class="plat__name">iPhone</div>
+        </div>
+      </div>
+
+      <div class="get__cta">
+        <a class="btn btn--primary" href="https://github.com/senweiliang/near" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.53-1.34-1.3-1.7-1.3-1.7-1.06-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.1-.76.4-1.27.74-1.56-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.5 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.25 5.69.41.36.78 1.05.78 2.12v3.14c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"/></svg>
+          <span data-i18n="get.cta1">Get Near on GitHub</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ================= FOOTER ================= -->
+<footer class="footer">
+  <div class="wrap footer__grid">
+    <div>
+      <div class="brand">Near<span class="dot">.</span></div>
+      <div class="footer__tag">no server · no accounts · no record</div>
+      <div class="footer__meta" data-i18n="footer.meta">a quiet room on this network</div>
+    </div>
+    <nav class="footer__links" aria-label="Footer">
+      <a href="https://github.com/senweiliang/near" target="_blank" rel="noopener">github.com/senweiliang/near →</a>
+      <a href="#features" data-i18n="footer.features">features</a>
+      <a href="#how" data-i18n="footer.how">how it works</a>
+      <a href="#top" data-i18n="footer.top">back to top</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  var I18N = {
+    "skip": { en: "Skip to download", zh: "跳到下载" },
+    "nav.features": { en: "features", zh: "功能" },
+    "nav.how": { en: "how it works", zh: "原理" },
+    "nav.get": { en: "get it", zh: "获取" },
+
+    "hero.eyebrow": { en: "no accounts · no server · no record", zh: "无账号 · 无服务器 · 不留记录" },
+    "hero.h1": { en: "A quiet room on this network.", zh: "这个网络上，一间安静的房间。" },
+    "hero.lead": {
+      en: "Near finds the people around you and lets you send messages, photos and any file straight to them — across Mac, Windows, Android and iPhone. No sign-up, no accounts, no history.",
+      zh: "Near 会找到你身边的人，让你把消息、照片和任意文件直接发给他们——在 Mac、Windows、Android、iPhone 之间通用。无需注册、没有账号、不存历史。"
+    },
+    "hero.cta1": { en: "Get Near", zh: "获取 Near" },
+    "hero.note": { en: "<b>Free &amp; open source.</b> macOS · iOS · Android · Windows.", zh: "<b>免费开源。</b> macOS · iOS · Android · Windows." },
+
+    "mani.eyebrow": { en: "the whole idea", zh: "整个想法" },
+    "mani.body": {
+      en: "No sign-up. No server. No history. Just <b>the people already around you</b>, and a place to talk.",
+      zh: "无需注册。没有服务器。不留历史。只有<b>你身边已经在场的人</b>，和一处可以说话的地方。"
+    },
+
+    "feat.eyebrow": { en: "what it does", zh: "它能做什么" },
+    "feat.h2": { en: "Made for sharing with people nearby.", zh: "为和身边的人分享而生。" },
+    "feat.desc": {
+      en: "No cloud, no middle-man — whatever you send goes straight from your device to theirs.",
+      zh: "没有云、没有中间人——你发的东西，直接从你的设备到对方的设备。"
+    },
+
+    "card.send.ey": { en: "send anything", zh: "什么都能发" },
+    "card.send.h3": { en: "Send any file, not just photos", zh: "什么文件都能发，不止照片" },
+    "card.send.p": {
+      en: "Messages, photos, and any file at all — documents, videos, zip archives — go straight to the person you pick, at full quality.",
+      zh: "消息、照片，还有任意文件——文档、视频、压缩包——原画质直接送到你选的那个人手上。"
+    },
+
+    "card.cross.ey": { en: "any device to any device", zh: "设备之间随便发" },
+    "card.cross.h3": { en: "Mac to phone, phone to PC", zh: "电脑发手机，手机发电脑" },
+    "card.cross.p": {
+      en: "Send freely between Mac, Windows, Android and iPhone. A file from your laptop lands on someone's phone just the same.",
+      zh: "在 Mac、Windows、Android、iPhone 之间随便发。从电脑发出的文件，一样直接落到别人手机上。"
+    },
+
+    "card.auto.ey": { en: "hands-off", zh: "全自动" },
+    "card.auto.h3": { en: "Files arrive on their own", zh: "文件自己就到了" },
+    "card.auto.p": {
+      en: "Switch on auto-accept and what people send saves straight to your device — files to Downloads, photos to your gallery. Nothing to tap.",
+      zh: "打开自动接收，别人发来的东西直接存进你的设备——文件进下载文件夹，照片进相册。一下都不用点。"
+    },
+
+    "card.disc.ey": { en: "discovery", zh: "发现" },
+    "card.disc.h3": { en: "Everyone just shows up", zh: "人自己就出现" },
+    "card.disc.p": {
+      en: "Open Near and everyone on the same network appears — no codes, no adding contacts.",
+      zh: "打开 Near，同一网络里的人都会出现——不用暗号，也不用加好友。"
+    },
+
+    "card.room.ey": { en: "room + 1:1", zh: "群聊 + 私聊" },
+    "card.room.h3": { en: "The whole room, or just one", zh: "对整屋人，或只对一个" },
+    "card.room.p": {
+      en: "Send to everyone at once, or open a private thread with any one person.",
+      zh: "对所有人群发，或和某一个人单独聊。"
+    },
+
+    "card.rec.ey": { en: "no record", zh: "不留记录" },
+    "card.rec.h3": { en: "Gone when you close it", zh: "一关就没" },
+    "card.rec.p": {
+      en: "Near keeps no history. Close the app and the conversation is gone — never saved anywhere, never sent to a server.",
+      zh: "Near 不保存历史。关掉应用，聊天记录随之消失——从不存到任何地方，也从不发往服务器。"
+    },
+    "card.rec.tag": { en: "nothing is saved", zh: "什么都不留" },
+
+    "how.eyebrow": { en: "how it works", zh: "怎么运作" },
+    "how.h2": { en: "Three steps, no accounts in sight.", zh: "三步，全程不见账号。" },
+    "how.desc": {
+      en: "Open the app — it handles the finding, connecting and sending for you.",
+      zh: "打开应用——发现、连接、发送，它都替你搞定。"
+    },
+    "how.you": { en: "You", zh: "你" },
+    "how.peer": { en: "Peer", zh: "对方" },
+    "how.s1.n": { en: "01 · discover", zh: "01 · 发现" },
+    "how.s1.h3": { en: "Everyone shows up", zh: "人自己就出现" },
+    "how.s1.p": {
+      en: "Open Near and everyone else on the same Wi-Fi appears on their own — no codes to share, no contacts to add.",
+      zh: "打开 Near，同一个 Wi-Fi 上的其他人会自己出现——不用交换暗号，也不用加好友。"
+    },
+    "how.s2.n": { en: "02 · connect", zh: "02 · 连接" },
+    "how.s2.h3": { en: "A direct line", zh: "直接连上" },
+    "how.s2.p": {
+      en: "The moment you both open it, your devices link up straight to each other — nothing in the middle, nothing to set up.",
+      zh: "你们一打开，两台设备就直接连到彼此——中间没有中转，也没有要设置的东西。"
+    },
+    "how.s3.n": { en: "03 · talk", zh: "03 · 对话" },
+    "how.s3.h3": { en: "Send anything, keep nothing", zh: "什么都能发，什么都不留" },
+    "how.s3.p": {
+      en: "Text, images and files go straight to the other side. Close the app and it's all gone — nothing saved, nothing uploaded.",
+      zh: "文字、图片、文件直接送到对面。关掉应用，一切随之消失——不保存、不上传。"
+    },
+
+    "get.eyebrow": { en: "get it", zh: "获取" },
+    "get.h2": { en: "Bring Near to your network.", zh: "把 Near 带到你的网络。" },
+    "get.desc": {
+      en: "Free and open, for every device you already use.",
+      zh: "免费开源，适配你已经在用的每台设备。"
+    },
+    "get.cta1": { en: "Get Near on GitHub", zh: "在 GitHub 上获取" },
+
+    "footer.meta": { en: "a quiet room on this network", zh: "这个网络上，一间安静的房间" },
+    "footer.features": { en: "features", zh: "功能" },
+    "footer.how": { en: "how it works", zh: "原理" },
+    "footer.top": { en: "back to top", zh: "回到顶部" }
+  };
+
+  var META = {
+    title: {
+      en: "Near — a quiet room on this network",
+      zh: "Near — 这个网络上，一间安静的房间"
+    },
+    desc: {
+      en: "Near lets you send messages, photos and any file straight to the people on your network — across Mac, Windows, Android and iPhone. No sign-up, no server, no history.",
+      zh: "Near 让你把消息、照片和任意文件直接发给同一网络里的人——Mac、Windows、Android、iPhone 通用。无需注册、没有服务器、不留历史。"
+    }
+  };
+
+  (function () {
+    var htmlEl = document.documentElement;
+    var langBtn = document.getElementById('langToggle');
+    var descMeta = document.querySelector('meta[name="description"]');
+
+    function applyLang(lang) {
+      htmlEl.setAttribute('data-lang', lang);
+      htmlEl.setAttribute('lang', lang === 'zh' ? 'zh-Hans' : 'en');
+      var nodes = document.querySelectorAll('[data-i18n]');
+      for (var i = 0; i < nodes.length; i++) {
+        var k = nodes[i].getAttribute('data-i18n');
+        if (I18N[k] && I18N[k][lang] != null) nodes[i].innerHTML = I18N[k][lang];
+      }
+      document.title = META.title[lang];
+      if (descMeta) descMeta.setAttribute('content', META.desc[lang]);
+      if (langBtn) {
+        var label = langBtn.querySelector('.lt-label');
+        if (label) label.textContent = lang === 'zh' ? 'EN' : '中';
+        langBtn.setAttribute('aria-label', lang === 'zh' ? 'Switch to English' : '切换到中文');
+      }
+      try { localStorage.setItem('near-lang', lang); } catch (e) {}
+    }
+
+    var saved = null;
+    try { saved = localStorage.getItem('near-lang'); } catch (e) {}
+    var initial = saved || (((navigator.language || '') + '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en');
+    applyLang(initial);
+
+    if (langBtn) {
+      langBtn.addEventListener('click', function () {
+        applyLang(htmlEl.getAttribute('data-lang') === 'zh' ? 'en' : 'zh');
+      });
+    }
+
+    // nav hairline on scroll
+    var nav = document.getElementById('nav');
+    var onScroll = function () {
+      if (window.scrollY > 8) nav.classList.add('is-stuck');
+      else nav.classList.remove('is-stuck');
+    };
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+
+    // reveal on enter
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var items = document.querySelectorAll('.reveal');
+    if (reduce || !('IntersectionObserver' in window)) {
+      for (var j = 0; j < items.length; j++) items[j].classList.add('is-visible');
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add('is-visible'); io.unobserve(e.target); }
+      });
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    for (var m = 0; m < items.length; m++) io.observe(items[m]);
+  })();
+</script>
+</body>
+</html>
