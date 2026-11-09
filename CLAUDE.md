@@ -15,6 +15,9 @@
 - Flutter SDK ^3.11.5，Material 3 + 自定义 Cupertino 路由
 - 发现：`bonsoir` ^5.1.0（mDNS / Bonjour）
 - 传输：`shelf` + `shelf_web_socket` 当 server，`web_socket_channel` 当 client
+- 加密：`cryptography`（Ed25519 / X25519 / HKDF / ChaCha20-Poly1305）+ `cryptography_flutter`（自动启用系统原生实现，无需手动 enable）
+- 通知：`flutter_local_notifications`（Android 需开 core library desugaring，已在 `build.gradle.kts` 配好）
+- 拖放 / 打包：`desktop_drop`（桌面拖文件进会话）、`archive`（文件夹打 zip）
 - 持久化：`shared_preferences`（仅 myId / myName，不存历史消息）
 - 媒体：`file_picker`、`gal`（保存相册）、`open_filex`、`share_plus`、`super_clipboard`、`flutter_linkify` + `url_launcher`
 - 字体：`google_fonts`（Hanken Grotesk + JetBrains Mono）
@@ -31,7 +34,11 @@
 | `transport.dart` | WebSocket 连接管理。dual-stack server、IPv4 lookup、ID 去重、keepalive、redial、文件分块传输；通过 `onChannelEstablished` / `onChannelClosed` 回调把 channel 状态喂给 chat |
 | `peer.dart` | `Peer` 模型（id/name/host/port + `online` flag + `lastActiveAt` 用于 LRU 排序）+ `ChatMessage` 模型（含 `SendStatus`、图片 base64 缓存、文件元信息、`bytesTransferred`、offer 三态 flag、`fanout` per-peer 状态表）+ `FanoutState` / `FanoutEntry`（仅 sender 端用，不进 wire format） |
 | `chat.dart` | `Chat extends ChangeNotifier`：粘合 discovery + transport，维护 `messages` / `peers` / ack timer / 文件接收 sink；Android 通过 `MethodChannel('near/files')` 走 MediaStore；通过 `MethodChannel('near/background')` 启停 Android foreground service |
-| `home_page.dart` | 单文件大屏：Splash / NamePrompt / PeerList / Conversation 全在这里。约 2500 行，是后续优化的主战场 |
+| `home_page.dart` + `home/*.dart` | UI 主体，用 `part` 拆成 `peer_list` / `conversation` / `message_bubble` / `compose` / `splash` / `file_bubble` / `share_sheet`（part 文件共享库私有符号，`_Xxx` 类可跨文件互用）。`home_page.dart` 本身只留 HomePage、公共小工具和 `_sendPathsTo`（文件 / 文件夹统一发送入口） |
+| `secure_channel.dart` | 端到端加密：`NearIdentity`（Ed25519 长期身份）、`SecureSession`（握手 + 收发两个方向的 AEAD）、`InnerFrame`（JSON 帧 / 二进制文件块帧编解码）。纯 Dart，有单测 |
+| `notifications.dart` | `Notifier`：新消息系统通知，失败只记日志 |
+| `share_intake.dart` | `MethodChannel('near/share')`：接收系统分享 / 「用 Near 打开」/ 拖到 Dock 的文件路径 |
+| `file_utils.dart` | `zipDirectory`：后台 isolate 把文件夹打成 zip |
 | `settings_page.dart` | 改昵称、auto-accept 文件 toggle、Stay-connected-in-background toggle（仅 Android）、查看调试日志 |
 | `log.dart` | 内存环形缓冲，给 settings 页展示 |
 
@@ -59,7 +66,7 @@ mDNS 解析出的主机名（`xxx.local.`）在某些网络下会优先解析到
 ### Keepalive + 后台恢复探活
 - 每条 channel 10s 周期 ping，token 携带时间戳
 - App 从后台 resume：`Chat.onAppResumed()` 对所有 connected peer 发 1s 超时的 probe ping，挂的丢弃 + redial。修了 iOS 切后台几秒回来 socket 已经死了但没收到 close frame 的 bug
-- **probe 不再用于文件传输健康检查**：原来 sender 端假死靠 onAppResumed probe 间接发现，但 probe 跟 file_chunk 共用同一个 sink — chunk 排队时 pong 也排队，1s 超时下 sender 经常被误判 dead 然后被 dropPeer 中断传输（receiver 切回前台触发 probe 是典型场景）。现在文件流自带窗口化 ack + 15s idle watchdog（`_kAckIdleTimeout`），probe 仅用作"刚 resume 时快速判一次连接还在不在"的副作用，文件传输不再依赖它
+- **probe 不再用于文件传输健康检查**：原来 sender 端假死靠 onAppResumed probe 间接发现，但 probe 跟 file_chunk 共用同一个 sink — chunk 排队时 pong 也排队，1s 超时下 sender 经常被误判 dead 然后被 dropPeer 中断传输（receiver 切回前台触发 probe 是典型场景）。现在文件流自带窗口化 ack + 2s idle watchdog（`_kAckIdleTimeout`），probe 仅用作"刚 resume 时快速判一次连接还在不在"的副作用，文件传输不再依赖它
 - `_keepAliveInterval = 10s` 定在 `transport.dart`
 
 ### mDNS lost 抖动 + bonsoir_android attrs 错位
@@ -101,20 +108,27 @@ PeerList tile 的 meta 行通过顶层 `_peerPreview(chat, peer)` 计算最近�
 分两段：先协商，再传输；群聊场景按 peer 独立跟踪状态。
 
 1. **协商**：sender 发 `file_offer`（携带 ChatMessage 元数据，无字节）。receiver 根据 `autoAcceptFiles` 设置决定立即回复 `file_accept` 或先把 bubble 标 `awaitingAccept` 等用户点 Accept/Ignore，对应回 `file_accept` 或 `file_decline`
-2. **传输（窗口化 ack）**：sender 收到 `file_accept` 后开始 `file_chunk(id, seq, data=base64)` → `file_end(id)`。chunk size 64KB，sender 维护 per-msgId 的 `_OutgoingFlow`，inflight bytes 上限 1 MB（约 16 个 chunk）。窗口满时主循环挂在 `slotWaiter` Completer 上等。**receiver 每写完一个 chunk 回 `file_chunk_ack(id, seq)`**（Android 走 `_androidChain` 异步链，链尾 ack；其他平台 `sink.add` 后立即 ack），sender 收到 ack 推进窗口 + 累加 acked 字节作进度。`file_end` 在所有 inflight 都 ack 后才发，确保 receiver 端 sink 已 flush 全部字节
-3. **传输健康检查**：sender 端每条流挂一个 500ms 周期 watchdog，**`_kAckIdleTimeout = 2s`** 内没收到任何新 ack → 整体 fail。LAN 场景下正常 ack 间隔 = receiver 单 chunk 处理时间（base64Decode + 写盘，iOS/macOS < 1ms，Android MediaStore 串行链最差 ~50ms），2s 足以覆盖正常延迟，超过基本就是真假死（对端 crash / 网线拔了 / Wi-Fi 切换中）。channel 关闭时 `_failFlowsOf(peerId)` 唤醒所有挂在 slotWaiter 上的 sender 循环，避免永远等。**这套 in-band 检测取代了过去依赖 `onAppResumed` probe + 文本 ACK 500ms 超时来兜文件场景的设计**，sender 不再误判活的为死的，也不会在对端真死时误标 delivered（旧 fire-and-forget 实现的失败模式）
+2. **传输（窗口化 ack）**：sender 收到 `file_accept` 后开始发**二进制**文件块帧（`ChunkFrame(msgId, offset, bytes)`，不再 base64 进 JSON）→ `file_end(id)`。块按**绝对字节偏移**寻址，receiver 只接 `offset == 已接收字节数` 的块（`_incomingOffset`），旧连接残留 / 重复块自然丢弃。chunk size 64KB，sender 维护 per-(msgId, peerId) 的 `_OutgoingFlow`，inflight bytes 上限 1 MB（约 16 个 chunk）。窗口满时主循环挂在 `waitForAck()` 上等。**receiver 每写完一个 chunk 回 `file_chunk_ack(id, offset)`**（Android 走 `_androidChain` 异步链，链尾 ack；其他平台 `sink.add` 后立即 ack），sender 收到 ack 推进窗口 + 累加 acked 字节作进度。`file_end` 在所有 inflight 都 ack 后才发，确保 receiver 端 sink 已 flush 全部字节
+3. **传输健康检查**：sender 端每条流挂一个 500ms 周期 watchdog，**`_kAckIdleTimeout = 2s`** 内没收到任何新 ack → 整体 fail。LAN 场景下正常 ack 间隔 = receiver 单 chunk 处理时间（解密 + 写盘，iOS/macOS < 1ms，Android MediaStore 串行链最差 ~50ms），2s 足以覆盖正常延迟，超过基本就是真假死（对端 crash / 网线拔了 / Wi-Fi 切换中）。连接关闭时 `_failFlowsOn(conn)` 按**连接**（不是 peerId）唤醒并中止挂在其上的 sender 循环，错误类型是 `ChannelLostException`（区别于 idle 超时等真失败）。**这套 in-band 检测取代了过去依赖 `onAppResumed` probe + 文本 ACK 500ms 超时来兜文件场景的设计**，sender 不再误判活的为死的，也不会在对端真死时误标 delivered（旧 fire-and-forget 实现的失败模式）
 4. **群聊 fanout**：`sendFile` 时按 `connectedPeerIds`（私聊则是 `[toId]`）把每个 peer 写进 `msg.fanout` 表，初始 `FanoutState.offered`。`file_offer` 广播给所有 channel
    - **首个 `file_accept` 进来**：该 entry → `sending`，清 `msg.offerPending`（让 progress bar 开始动），单独跑 `sendFileBytes(file, thatPeerId)`，progress 是 receiver ack 累计字节
    - **`file_decline`**：entry → `declined`（**注意：不是 `failed`**，declined 是接收方主动拒绝，正常终态，不算发送失败）
-   - **该 peer 传输 onError**：entry → `failed`（真正的传输错误）
+   - **该 peer 传输 onError**：`ChannelLostException` → entry `paused`（见下「断点续传」）；其他错误 → `failed`
+   - **该 peer 断线时 entry 还在 `offered`**（对方还没回应）→ 直接 `failed` 并 finalize，否则 fanout 永不收敛
    - 都**不影响其他 peer**（修过 v1 实现里"1 人 decline 误杀全员 / 多 accept 共用一个 progress 变量乱跳 / `_outgoingFiles` 提前清掉"三连 bug）
    - **每条 peer 完成后** 调 `_maybeFinalizeFanout`：所有 entry 都进终态（`delivered` / `declined` / `failed`）才聚合：
      - 任一 delivered → `msg.status=delivered`，`declined=false`
      - 全部 `declined`（无 delivered 无 failed）→ `msg.status=delivered` + `declined=true`（**故意不用 failed，避免触发 `_MessageBubble` 的红色 ⚠️ "Send failed" 图标**）
      - 其他（无 delivered 但有 failed）→ `msg.status=failed`，`declined=false`
      - 最后清 `_outgoingFiles`
-   - 文件被读多次（每个 acceptor 一份独立流），实现简单。带宽友好的"一份流广播给所有 acceptors"留作优化项
+   - 每个 acceptor 一份独立流、独立读文件。**「一份流广播」评估后不做**：加密后每个 peer 的会话密钥不同，密文本来就得逐 peer 生成；改二进制帧后也没有 base64 编码可省；重复读盘由 OS page cache 吸收。剩下能省的只有几次 `read` 系统调用，不值得引入多 peer 共享窗口的复杂度
    - `msg.bytesTransferred` 改为派生：取所有 fanout entry 的最大值，progress bar 单调前进不抖动
+
+5. **断点续传**：连接断开后两端都保留状态 `_kResumeGrace = 60s`：
+   - sender：entry `paused`（UI 显示 `paused`），保留 `_outgoingFiles`；60s 内没续上 → `failed`
+   - receiver：sink / MediaStore session 不关，`msg.transferPaused = true`；60s 后 `_abortIncoming`（Android 走 `cancelIncoming` 删半成品）
+   - 重连 `_onChannelEstablished` 时 receiver 对每条未完成的接收发 `file_resume(id, offset)`（Android 先 await `_androidChain` 让偏移可信）；sender `cancelFlow` 旧流后从 offset 重开。无法续传（文件已清 / 已判 failed）回 `file_cancel`，receiver 立即标 failed
+   - `FanoutEntry.flowGeneration`：每次（重新）起流 +1，旧流迟到的 onError / onProgress 按代号丢弃，避免把新流的状态覆盖回 paused
 
 文本消息的 `_ackTimers` 500ms 超时是 IM 即时反馈用的；文件场景由窗口化 ack 自身决定 status — onComplete 表示对端最后一个 chunk 也 ack 完成（真 delivered），onError 来自 sink 写抛错 / channel close / `_kAckIdleTimeout` 触发。
 
@@ -258,10 +272,20 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 
 ---
 
-## 五、协议格式（WebSocket JSON）
+## 五、协议格式（v2，端到端加密）
+
+### 握手与加密
+- 每端持有一把 **Ed25519 长期身份密钥**（seed 存 SharedPreferences `identitySeed`；测试模式每次新生成）。指纹 = 公钥 SHA-256 前 16 字节，Settings → Security 显示自己的，会话页点对方名字看对方的
+- 连接建立后双方各发一条**明文 text 帧** hello：`{type:hello, v:2, fromId, idKey, eph, sig}`，`eph` 是本次连接的 X25519 临时公钥，`sig` = Ed25519 签名(`near-hello-v2|fromId|` + eph)
+- 收到 hello：验签 → X25519 求共享密钥 → HKDF 派生两个方向的 key（info 带发送方 eph，两个方向互不相同）→ **TOFU** 比对 `trustedKeys`（SharedPreferences，peerId → idKey）。首次见到就记住；不一致则拒绝连接、`_conflictingKeys` 记下新 key，会话页顶部出横幅，用户核对后点 Trust new key（`chat.trustNewKey`）才放行
+- 之后每一帧都是**二进制** ChaCha20-Poly1305 密文，nonce = 方向内递增计数器。加解密是异步的，`_Connection` 用 send / receive 两条 Future 链保证顺序与计数器一致
+- 没有 `v` 字段的 hello（v0.1.x 旧版明文协议）直接断开，**新旧版本不互通**
+- `msg` / `file_offer` 的 `fromId` 必须等于握手身份，否则丢弃（防冒充）
+
+### 明文帧内容（加密层之内）
+首字节 0 = JSON，1 = 文件块（`[1][idLen u8][msgId][offset u64 BE][bytes]`）。JSON 消息：
 
 ```jsonc
-{ "type": "hello",   "fromId": "<uuid>" }
 { "type": "msg",     "msg": { /* ChatMessage.toJson */ } }
 { "type": "ack",     "id":  "<msgId>" }
 { "type": "ping",    "token": "<id>" }
@@ -269,9 +293,10 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 { "type": "file_offer",   "msg": { /* ChatMessage with fileName/fileSize/fileMime */ } }
 { "type": "file_accept",  "id":  "<msgId>" }
 { "type": "file_decline", "id":  "<msgId>" }
-{ "type": "file_chunk",     "id":  "<msgId>", "seq": 0, "data": "<base64>" }
-{ "type": "file_chunk_ack", "id":  "<msgId>", "seq": 0 }
+{ "type": "file_chunk_ack", "id":  "<msgId>", "offset": 0 }
 { "type": "file_end",       "id":  "<msgId>" }
+{ "type": "file_resume",    "id":  "<msgId>", "offset": 0 }   // receiver → sender，重连后续传
+{ "type": "file_cancel",    "id":  "<msgId>" }                // sender → receiver，无法续传
 ```
 
 `ChatMessage.toJson()`：`id` / `fromId` / `fromName` / `text` / `ts`（ms）/ `toId?` / `image?`(base64) / `imageMime?` / `fileName?` / `fileSize?` / `fileMime?`。`toId == null` 表示群发。
@@ -318,19 +343,15 @@ Settings → Receiving → `Auto-accept files` 切换。关掉后：
 
 ## 七、已知优化方向 / 给后续会话的提示
 
-- `home_page.dart` 单文件 ~2500 行，包含会话页、附件预览、图片裁剪、文件 bubble 等多个独立 widget。拆分时优先抽：`_MessageBubble` / `_FileBubble` / 附件 picker bottom sheet / SplashView / NamePrompt
-- 文件传输无并发控制：多文件同时发会顺序排队但不会丢，注意大文件 base64 占用内存
-- **群聊文件「一份流广播」未做**：当前每个 acceptor 独立读一遍文件 + 独立 `sendFileBytes`，N 个 acceptor 就读 N 遍。优化方向 — 第一个 accept 就开始读 + 广播给已 accept 集合；新 accept 进来时若还在传，加入正在 broadcast 的 channel set；若已传完，再为后到 accept 单独跑一份
+- 文件传输无并发控制：多文件同时发各自独立跑流，共享同一条连接带宽
 - 没有消息持久化：app 杀掉后历史就没了。这是设计如此（"no record"），但如果未来要加，建议落 SQLite + 选择性保留最近 N 条
 - 文本 ACK 超时 500ms 在跨子网或慢 Wi-Fi 上偏短，但加大会让"对方掉线"的反馈延迟。可考虑随网络质量自适应（文件传输已迁移到窗口化 ack，不受这个超时影响）
-- **群聊 fanout 按"快照"，不跟随 peer 进出**：`sendFile` 时刻的 `connectedPeerIds` 决定 fanout 表，之后即使有新 peer 加入也收不到这条 offer，已断开的 peer 不会从 fanout 移除（永远停在 `offered`，导致 `_maybeFinalizeFanout` 永远不收敛）。修法：`_onPeerLost` 时遍历 `_outgoingFiles` 把对应 entry 标 `declined`，触发 finalize
+- **群聊 fanout 按"快照"**：`sendFile` 时刻的 `connectedPeerIds` 决定 fanout 表，之后新加入的 peer 收不到这条 offer（设计如此）。断线 peer 卡 `offered` 的问题已修（见文件传输协议第 4 条）
 - **测试设备**：同机跑两个 sandboxed mac 实例不能真实模拟（共享 container + 同 bundleId mDNS 行为异常 + loopback sandbox 限制）。需要至少两台物理设备；测 `K of N` 群聊聚合需要 ≥ 3 端
 - **多实例本地测试**：通过 `NEAR_TEST_ID=alice ./build/macos/Build/Products/Release/near.app/Contents/MacOS/near &` 启动独立实例（不读 SharedPreferences、用独立 myId / 独立 `near_files_$testId` 文件缓存目录、强制 autoAcceptFiles=true）。同机两实例之间 dial loopback 时 dedupe 风暴有真 bug —— alice/bob 同机互联会出 `dedupe close` 死循环，偶发 SIGSEGV，跨机正常
 - **iOS 后台保活未做**：scope 收敛到 Android。要做需要 BGTaskScheduler 唤醒 + 重连 / VoIP push（后者得后端，违背 no-server 原则）
 - `super_clipboard` 在 Linux / Windows 桌面端尚未验证，目前只跑 macOS / iOS / Android
 - 设计稿目录 `../lan-chat-designs/` 是 HTML 原型，是 source of truth；改 UI 前先去看对应文件（`24-near.html` 主屏，`25-files.html` 文件交互，`27-fanout.html` 群聊文件 fanout 详情面板）
-- **进入对话"弹一下"问题（待修）**：`ListView.builder` 是 lazy build，第一个 post-frame 时 `maxScrollExtent` 只反映 viewport + cacheExtent 那一截 build 出的高度，单次 `jumpTo(maxScrollExtent)` 跳不到真正底部。`onChange` 后续 stickyBottom 二次 jumpTo 会让人看到"分段下弹"。
-  - **当前实现**（`home_page.dart` initState）：单次 `_jumpToEnd()` + Opacity gate，跟原作者的设计保持一致 — 简单但消息多时仍会"弹"。
-  - **试过的方案：循环 jumpTo 直到 maxScrollExtent 稳定（已撤）**。原本想在 Opacity 0 隐身期反复 jumpTo 直到一帧前后 max 不再增长才揭开，理论上能解决；实测有 bug — 暂时回撤了。具体 bug 表现待复现，可能跟 `_onChange` 的 stickyBottom 逻辑/软键盘 inset 调整产生竞争，或者跟 `Hero` flight 期间的 scroll position 干扰。
-  - **不能换 `reverse: true`** —— 单消息会贴 viewport 底部，违反"少消息时 top-anchored"的预期。
-  - **备选方案**：`scrollable_positioned_list` 包，用 `initialScrollIndex + initialAlignment: 1.0` 一次性 index-based 定位，不依赖跳像素，可以删掉 `_initialSettled` + Opacity gate。改动量 4-6 小时，但要替换 stickyBottom 检测（用 `ItemPositionsListener`）+ 软键盘适配 + Selection 兼容性测试。**触发点**：循环 jumpTo bug 排查清楚再修，或者直接换包。
+- **会话列表用 `reverse: true` + `shrinkWrap` + `Align(topCenter)`**：offset 0 即底部，进入会话 / 键盘弹起天然停在最新消息，不再需要 post-frame `jumpTo` + Opacity gate（旧实现因 lazy build 的 `maxScrollExtent` 不准会"分段下弹"）。消息少时 shrinkWrap 让列表高度 = 内容高度，再顶部对齐，所以不会出现单条消息贴底。代价：用户上翻时有新消息进来，视口会被向上推一条的高度（主流 IM 同样行为）
+- **系统分享入口**：Android `ACTION_SEND(_MULTIPLE)` intent-filter（`MainActivity.receiveShare` 后台线程把 content:// 复制到 cache）；iOS / macOS 声明 `CFBundleDocumentTypes`（public.data / public.content，macOS 另加 public.folder），出现在分享菜单「用 Near 打开」/ Finder 打开方式 / 拖到 Dock 图标。iOS 用 scene lifecycle 插件 `NearShareInbox`（`AppDelegate.swift`），macOS 用 `FlutterAppLifecycleDelegate.handleOpenURLs`（`MainFlutterWindow.swift`）。**没做 iOS Share Extension**（需要新 target + App Group 签名配置），所以 iOS 照片 app 的分享菜单里不一定有 Near，Files app 里一定有
+- **通知**：`chat.activeConversation`（HomePage `_open` 维护）+ `appInForeground`（lifecycle 维护）决定是否弹；正在看的会话不弹。`_notifier.init()` 不能 await —— 首次会弹系统授权框，await 会卡住 `start()` 导致不联网

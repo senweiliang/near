@@ -7,6 +7,9 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.OpenableColumns
 import android.provider.MediaStore
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -14,6 +17,7 @@ import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.io.OutputStream
 import java.util.UUID
 
@@ -24,6 +28,10 @@ class MainActivity : FlutterActivity() {
 
     private data class Session(val uri: Uri, val out: OutputStream)
     private val sessions = mutableMapOf<String, Session>()
+
+    private var shareChannel: MethodChannel? = null
+    private val pendingShared = mutableListOf<String>()
+    private var shareDartReady = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -38,6 +46,18 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        shareChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "near/share").apply {
+            setMethodCallHandler { call, result ->
+                if (call.method == "getInitial") {
+                    shareDartReady = true
+                    result.success(pendingShared.toList())
+                    pendingShared.clear()
+                } else {
+                    result.notImplemented()
+                }
+            }
+        }
+        receiveShare(intent)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, backgroundChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -58,6 +78,58 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        receiveShare(intent)
+    }
+
+    // 其他 app 分享过来的 content:// 在后台线程复制到 cache，再把本地路径交给 Dart
+    private fun receiveShare(intent: Intent?) {
+        val uris = sharedUris(intent ?: return)
+        if (uris.isEmpty()) return
+        intent.action = null
+        val appContext = applicationContext
+        Thread {
+            val paths = uris.mapNotNull { copyToCache(appContext, it) }
+            Handler(Looper.getMainLooper()).post {
+                if (paths.isEmpty()) return@post
+                if (shareDartReady) {
+                    shareChannel?.invokeMethod("shared", paths)
+                } else {
+                    pendingShared.addAll(paths)
+                }
+            }
+        }.start()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sharedUris(intent: Intent): List<Uri> = when (intent.action) {
+        Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
+        Intent.ACTION_SEND_MULTIPLE ->
+            intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList()
+        else -> emptyList()
+    }
+
+    private fun copyToCache(context: android.content.Context, uri: Uri): String? {
+        return try {
+            val resolver = context.contentResolver
+            var name = uri.lastPathSegment ?: "file"
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) name = cursor.getString(0)
+            }
+            val safeName = name.replace('/', '_')
+            val dir = File(context.cacheDir, "shared/${UUID.randomUUID()}").apply { mkdirs() }
+            val target = File(dir, safeName)
+            resolver.openInputStream(uri)?.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            } ?: return null
+            target.absolutePath
+        } catch (e: Exception) {
+            Log.e("Near", "copy shared uri failed: $uri", e)
+            null
+        }
     }
 
     private fun ensureNotificationPermission() {

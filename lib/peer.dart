@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -20,12 +21,35 @@ class Peer {
 
 enum SendStatus { pending, delivered, failed }
 
-enum FanoutState { offered, sending, delivered, declined, failed }
+/// paused：连接断开，等对端重连后续传；超时转 failed。
+enum FanoutState {
+  offered,
+  sending,
+  paused,
+  delivered,
+  declined,
+  failed;
+
+  bool get isTerminal => this == delivered || this == declined || this == failed;
+}
 
 class FanoutEntry {
   FanoutState state;
   int bytesTransferred;
+  // 每次（重新）开始发送流 +1，旧流迟到的回调据此丢弃
+  int flowGeneration = 0;
+  Timer? pauseTimer;
   FanoutEntry({this.state = FanoutState.offered, this.bytesTransferred = 0});
+}
+
+enum FanoutOutcome { inProgress, delivered, allDeclined, failed }
+
+/// 全部 entry 进终态才有结论：任一送达即 delivered；全拒绝单列（不算发送失败）；其余为 failed。
+FanoutOutcome aggregateFanout(Iterable<FanoutState> states) {
+  if (!states.every((s) => s.isTerminal)) return FanoutOutcome.inProgress;
+  if (states.any((s) => s == FanoutState.delivered)) return FanoutOutcome.delivered;
+  if (states.every((s) => s == FanoutState.declined)) return FanoutOutcome.allDeclined;
+  return FanoutOutcome.failed;
 }
 
 class ChatMessage {
@@ -52,6 +76,7 @@ class ChatMessage {
   bool offerPending;     // sender side: at least one peer hasn't replied yet
   bool awaitingAccept;   // receiver side: waiting for local user to tap accept
   bool declined;         // sender side: terminal state, all peers declined / failed
+  bool transferPaused;   // receiver side: channel lost mid-transfer, waiting to resume
 
   // Sender-only per-peer fanout state. Empty on receiver side.
   final Map<String, FanoutEntry> fanout = {};
@@ -93,6 +118,7 @@ class ChatMessage {
     this.offerPending = false,
     this.awaitingAccept = false,
     this.declined = false,
+    this.transferPaused = false,
   });
 
   bool get hasImage => imageBase64 != null;

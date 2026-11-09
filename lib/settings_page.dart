@@ -237,6 +237,32 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ]),
           const SizedBox(height: 18),
+          _Section(title: 'Security', children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Key fingerprint',
+                    style: AppFonts.body(
+                        size: 15, weight: FontWeight.w500, color: AppColors.ink),
+                  ),
+                  const SizedBox(height: 6),
+                  SelectableText(
+                    widget.chat.myFingerprint,
+                    style: AppFonts.mono(size: 13, color: AppColors.ink2),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Messages and files are end-to-end encrypted. Tap a contact\'s name in a conversation to compare keys.',
+                    style: AppFonts.body(size: 12, color: AppColors.ink3, height: 1.4),
+                  ),
+                ],
+              ),
+            ),
+          ]),
+          const SizedBox(height: 18),
           _Section(title: 'Diagnostics', children: [
             _NavRow(
               icon: Icons.terminal_rounded,
@@ -258,7 +284,7 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 24),
           Center(
             child: Text(
-              'Near · v0.1.0',
+              'Near · v0.2.0',
               style: AppFonts.mono(
                 size: 11,
                 color: AppColors.ink3,

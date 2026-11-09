@@ -12,7 +12,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'discovery.dart';
+import 'notifications.dart';
 import 'peer.dart';
+import 'secure_channel.dart';
 import 'transport.dart';
 
 class Chat extends ChangeNotifier {
@@ -31,6 +33,20 @@ class Chat extends ChangeNotifier {
   // bonsoir_android 的 lost 事件 attrs 不可靠（拿到的是本机自己的 attrs），
   // 需要按 mDNS service.name 反查真实 peerId。`_onPeerFound` 时维护映射。
   final Map<String, String> _svcNameToPeerId = {};
+  // receiver 侧已接受的字节偏移；只接 offset 与之相等的块
+  final Map<String, int> _incomingOffset = {};
+  final Map<String, Timer> _incomingPauseTimers = {};
+  // TOFU：peerId → 首次见到的身份公钥（base64）
+  final Map<String, String> _trustedKeys = {};
+  // 公钥与记录不符而被拒绝的连接：peerId → 对端新公钥，等用户确认
+  final Map<String, Uint8List> _conflictingKeys = {};
+
+  late final NearIdentity identity;
+  final Notifier _notifier = Notifier();
+  /// 当前打开的会话（peerId；群聊为 [everyoneKey]），该会话的新消息不弹通知。
+  String? activeConversation;
+  bool appInForeground = true;
+  static const String everyoneKey = '*';
 
   bool autoAcceptFiles = true;
   bool autoSaveImages = false;
@@ -44,6 +60,10 @@ class Chat extends ChangeNotifier {
   static const String _kAutoAcceptFiles = 'autoAcceptFiles';
   static const String _kAutoSaveImages = 'autoSaveImages';
   static const String _kStayConnected = 'stayConnectedInBackground';
+  static const String _kIdentitySeed = 'identitySeed';
+  static const String _kTrustedKeys = 'trustedKeys';
+  // 连接断开后保留半截传输等待续传的时长
+  static const Duration _kResumeGrace = Duration(seconds: 60);
   static const Duration _ackTimeout = Duration(milliseconds: 500);
   static const MethodChannel _platform = MethodChannel('near/files');
   static const MethodChannel _bgPlatform = MethodChannel('near/background');
@@ -55,6 +75,7 @@ class Chat extends ChangeNotifier {
       myId = 'test-$testId-${DateTime.now().millisecondsSinceEpoch}';
       myName = testId;
       autoAcceptFiles = true;
+      identity = await NearIdentity.generate();
       debugPrint('[chat] TEST MODE id=$myId name=$myName');
     } else {
       final prefs = await SharedPreferences.getInstance();
@@ -72,7 +93,15 @@ class Chat extends ChangeNotifier {
       autoAcceptFiles = prefs.getBool(_kAutoAcceptFiles) ?? true;
       autoSaveImages = prefs.getBool(_kAutoSaveImages) ?? false;
       stayConnectedInBackground = prefs.getBool(_kStayConnected) ?? false;
+      identity = await _loadIdentity(prefs);
+      final trusted = prefs.getString(_kTrustedKeys);
+      if (trusted != null) {
+        _trustedKeys.addAll(
+            (jsonDecode(trusted) as Map<String, dynamic>).cast<String, String>());
+      }
     }
+    // 不 await：首次启动会弹系统通知授权框，等用户点之前不能卡住联网
+    if (!isTestMode) unawaited(_notifier.init());
     final base = await getApplicationDocumentsDirectory();
     final cacheSuffix = isTestMode ? '_$testId' : '';
     _fileCacheDir = Directory('${base.path}/near_files$cacheSuffix');
@@ -81,6 +110,8 @@ class Chat extends ChangeNotifier {
     }
     _transport = Transport(
       myId: myId,
+      identity: identity,
+      verifyPeerKey: _verifyPeerKey,
       onMessage: _onIncoming,
       onAck: _onAck,
       onFileOffer: _onFileOffer,
@@ -88,6 +119,8 @@ class Chat extends ChangeNotifier {
       onFileDecline: _onFileDecline,
       onFileChunk: _onFileChunk,
       onFileEnd: _onFileEnd,
+      onFileResume: _onFileResume,
+      onFileCancel: _onFileCancel,
       onChannelEstablished: _onChannelEstablished,
       onChannelClosed: _onChannelClosed,
     );
@@ -101,6 +134,57 @@ class Chat extends ChangeNotifier {
     if (stayConnectedInBackground) {
       await _ensureBackgroundService();
     }
+  }
+
+  Future<NearIdentity> _loadIdentity(SharedPreferences prefs) async {
+    final seed = prefs.getString(_kIdentitySeed);
+    if (seed != null) return NearIdentity.fromSeed(base64Decode(seed));
+    final created = await NearIdentity.generate();
+    await prefs.setString(_kIdentitySeed, base64Encode(await created.seed()));
+    return created;
+  }
+
+  bool _verifyPeerKey(String peerId, Uint8List key) {
+    final encoded = base64Encode(key);
+    final known = _trustedKeys[peerId];
+    if (known == encoded) return true;
+    if (known == null) {
+      _trustedKeys[peerId] = encoded;
+      _persistTrustedKeys();
+      return true;
+    }
+    debugPrint('[chat] identity key of $peerId changed, refusing connection');
+    _conflictingKeys[peerId] = key;
+    notifyListeners();
+    return false;
+  }
+
+  Future<void> _persistTrustedKeys() async {
+    if ((Platform.environment['NEAR_TEST_ID'] ?? '').isNotEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kTrustedKeys, jsonEncode(_trustedKeys));
+  }
+
+  String get myFingerprint => identity.fingerprint;
+
+  String? peerFingerprint(String peerId) {
+    final key = _trustedKeys[peerId];
+    return key == null ? null : fingerprintOf(base64Decode(key));
+  }
+
+  String? conflictingFingerprint(String peerId) {
+    final key = _conflictingKeys[peerId];
+    return key == null ? null : fingerprintOf(key);
+  }
+
+  /// 用户核对后接受对端的新身份公钥（如对方重装了 app），并立即重连。
+  Future<void> trustNewKey(String peerId) async {
+    final key = _conflictingKeys.remove(peerId);
+    if (key == null) return;
+    _trustedKeys[peerId] = base64Encode(key);
+    await _persistTrustedKeys();
+    notifyListeners();
+    _transport.redialAll();
   }
 
   Future<void> setStayConnectedInBackground(bool v) async {
@@ -287,6 +371,29 @@ class Chat extends ChangeNotifier {
       p.online = true;
       notifyListeners();
     }
+    _requestResumes(peerId);
+  }
+
+  /// 重连后对每条来自该 peer、尚未完成的接收任务发 file_resume，从已写字节处续传。
+  Future<void> _requestResumes(String peerId) async {
+    final pending = _incomingFrom.entries
+        .where((e) => e.value == peerId && _incomingOffset.containsKey(e.key))
+        .map((e) => e.key)
+        .toList();
+    for (final msgId in pending) {
+      // Android 写盘是异步链，等已排队的块落盘后偏移才可信
+      await _androidChain[msgId];
+      if (!_incomingOffset.containsKey(msgId)) continue;
+      _incomingPauseTimers.remove(msgId)?.cancel();
+      _messageById(msgId)?.transferPaused = false;
+      _transport.sendFileResume(peerId, msgId, _incomingOffset[msgId]!);
+    }
+    if (pending.isNotEmpty) notifyListeners();
+  }
+
+  ChatMessage? _messageById(String msgId) {
+    final idx = messages.lastIndexWhere((m) => m.id == msgId);
+    return idx == -1 ? null : messages[idx];
   }
 
   void _onChannelClosed(String peerId) {
@@ -298,28 +405,32 @@ class Chat extends ChangeNotifier {
         .map((e) => e.key)
         .toList();
     for (final msgId in affected) {
+      final m = _messageById(msgId);
+      if (_incomingOffset.containsKey(msgId)) {
+        // 已接受并在接收中：保留 sink 等对端重连续传，超时再放弃
+        m?.transferPaused = true;
+        _incomingPauseTimers[msgId]?.cancel();
+        _incomingPauseTimers[msgId] = Timer(_kResumeGrace, () {
+          debugPrint('[chat] resume grace expired id=$msgId');
+          _abortIncoming(msgId);
+        });
+        continue;
+      }
       _incomingFrom.remove(msgId);
-      _androidSessions.remove(msgId);
-      _androidChain.remove(msgId);
-      final sink = _incomingSinks.remove(msgId);
-      if (sink != null) {
-        () async {
-          try {
-            await sink.flush();
-          } catch (_) {}
-          try {
-            await sink.close();
-          } catch (_) {}
-        }();
+      if (m != null && (m.status == SendStatus.pending || m.awaitingAccept)) {
+        m.status = SendStatus.failed;
+        m.awaitingAccept = false;
       }
-      final idx = messages.lastIndexWhere((m) => m.id == msgId);
-      if (idx != -1) {
-        final m = messages[idx];
-        if (m.status == SendStatus.pending || m.awaitingAccept) {
-          m.status = SendStatus.failed;
-          m.awaitingAccept = false;
-        }
-      }
+    }
+    // 发给该 peer、对方还没回应的 offer：断线后对方不会再回，直接判失败，否则 fanout 永不收敛
+    var offerFailed = false;
+    for (final m in messages) {
+      if (m.fromId != myId || !m.hasFile) continue;
+      final entry = m.fanout[peerId];
+      if (entry == null || entry.state != FanoutState.offered) continue;
+      entry.state = FanoutState.failed;
+      _maybeFinalizeFanout(m);
+      offerFailed = true;
     }
     // 图片走 event-driven lifecycle（见 _dispatch）：channel 断了，把发往该 peer
     // 还没 ack 的在途图片标 failed。群发图（toId==null）只在再没有任何 channel 时
@@ -340,7 +451,7 @@ class Chat extends ChangeNotifier {
       debugPrint('[chat] channel down $peerId → mark offline');
       p.online = false;
     }
-    if (affected.isNotEmpty || imageFailed || (p != null && !p.online)) {
+    if (affected.isNotEmpty || imageFailed || offerFailed || (p != null && !p.online)) {
       notifyListeners();
     }
   }
@@ -350,6 +461,7 @@ class Chat extends ChangeNotifier {
     _bumpPeerActivity(msg.fromId);
     messages.add(msg);
     notifyListeners();
+    _notify(msg, msg.hasImage ? '[Image]' : msg.text);
     if (msg.imageBase64 != null) {
       final bytes = base64Decode(msg.imageBase64!);
       _resolveAspect(msg, bytes);
@@ -367,6 +479,7 @@ class Chat extends ChangeNotifier {
         host: p.host,
         port: p.port,
         online: true,
+        lastActiveAt: p.lastActiveAt,
       );
     } else if (!p.online) {
       p.online = true;
@@ -380,6 +493,7 @@ class Chat extends ChangeNotifier {
     debugPrint(
         '[chat] incoming file_offer id=${msg.id} name=${msg.fileName} size=${msg.fileSize} autoAccept=$autoAcceptFiles');
     _incomingFrom[msg.id] = fromPeerId;
+    _notify(msg, '[${msg.fileName}]');
     if (autoAcceptFiles) {
       messages.add(msg);
       notifyListeners();
@@ -392,7 +506,17 @@ class Chat extends ChangeNotifier {
     }
   }
 
+  void _notify(ChatMessage msg, String body) {
+    final conversation = msg.toId == null ? everyoneKey : msg.fromId;
+    if (appInForeground && activeConversation == conversation) return;
+    _notifier.show(
+      title: msg.toId == null ? '${msg.fromName} · Everyone' : msg.fromName,
+      body: body,
+    );
+  }
+
   void _prepareIncomingSink(ChatMessage msg) {
+    _incomingOffset[msg.id] = 0;
     if (Platform.isAndroid) {
       _androidChain[msg.id] = _beginAndroidIncoming(msg);
     } else {
@@ -443,20 +567,32 @@ class Chat extends ChangeNotifier {
           '[chat] file_accept dup id=$msgId from=$fromPeerId state=${entry.state}');
       return;
     }
-    entry.state = FanoutState.sending;
     msg.offerPending = false;
-    notifyListeners();
     debugPrint('[chat] file_accept id=$msgId from=$fromPeerId, sending bytes');
+    _startFlow(msg, entry, file, fromPeerId, 0);
+  }
+
+  void _startFlow(
+      ChatMessage msg, FanoutEntry entry, File file, String peerId, int offset) {
+    final generation = ++entry.flowGeneration;
+    bool stale() => generation != entry.flowGeneration;
+    entry.pauseTimer?.cancel();
+    entry.state = FanoutState.sending;
+    entry.bytesTransferred = offset;
+    notifyListeners();
     _transport.sendFileBytes(
-      msgId,
+      msg.id,
       file,
-      fromPeerId,
+      peerId,
+      startOffset: offset,
       onProgress: (acked) {
+        if (stale()) return;
         entry.bytesTransferred = acked;
         msg.bytesTransferred = _maxFanoutBytes(msg);
         notifyListeners();
       },
       onComplete: () {
+        if (stale()) return;
         entry.state = FanoutState.delivered;
         entry.bytesTransferred = msg.fileSize ?? entry.bytesTransferred;
         msg.bytesTransferred = _maxFanoutBytes(msg);
@@ -464,12 +600,75 @@ class Chat extends ChangeNotifier {
         notifyListeners();
       },
       onError: (e) {
-        debugPrint('[chat] sendFileBytes error id=$msgId peer=$fromPeerId: $e');
-        entry.state = FanoutState.failed;
-        _maybeFinalizeFanout(msg);
+        if (stale()) return;
+        debugPrint('[chat] sendFileBytes error id=${msg.id} peer=$peerId: $e');
+        if (e is ChannelLostException) {
+          entry.state = FanoutState.paused;
+          entry.pauseTimer = Timer(_kResumeGrace, () {
+            if (entry.state != FanoutState.paused) return;
+            entry.state = FanoutState.failed;
+            _maybeFinalizeFanout(msg);
+            notifyListeners();
+          });
+        } else {
+          entry.state = FanoutState.failed;
+          _maybeFinalizeFanout(msg);
+        }
         notifyListeners();
       },
     );
+  }
+
+  void _onFileResume(String msgId, int offset, String fromPeerId) {
+    final file = _outgoingFiles[msgId];
+    final msg = _messageById(msgId);
+    final entry = msg?.fanout[fromPeerId];
+    final resumable = entry != null &&
+        (entry.state == FanoutState.paused || entry.state == FanoutState.sending);
+    if (file == null || msg == null || !resumable) {
+      debugPrint('[chat] cannot resume id=$msgId for $fromPeerId');
+      _transport.sendFileCancel(fromPeerId, msgId);
+      return;
+    }
+    debugPrint('[chat] resume id=$msgId peer=$fromPeerId offset=$offset');
+    _transport.cancelFlow(msgId, fromPeerId);
+    _startFlow(msg, entry, file, fromPeerId, offset);
+  }
+
+  void _onFileCancel(String msgId, String fromPeerId) {
+    if (_incomingFrom[msgId] != fromPeerId) return;
+    _abortIncoming(msgId);
+  }
+
+  /// 放弃一条接收任务：关 sink / 删 MediaStore 半成品，bubble 标 failed。
+  void _abortIncoming(String msgId) {
+    _incomingFrom.remove(msgId);
+    _incomingOffset.remove(msgId);
+    _incomingPauseTimers.remove(msgId)?.cancel();
+    final chain = _androidChain.remove(msgId);
+    if (chain != null) {
+      chain.whenComplete(() {
+        final sessionId = _androidSessions.remove(msgId);
+        if (sessionId == null) return;
+        _platform
+            .invokeMethod<void>('cancelIncoming', {'sessionId': sessionId})
+            .catchError((Object e) => debugPrint('[chat] cancelIncoming failed: $e'));
+      });
+    }
+    final sink = _incomingSinks.remove(msgId);
+    if (sink != null) {
+      () async {
+        try {
+          await sink.close();
+        } catch (_) {}
+      }();
+    }
+    final m = _messageById(msgId);
+    if (m != null && m.status == SendStatus.pending) {
+      m.status = SendStatus.failed;
+      m.transferPaused = false;
+    }
+    notifyListeners();
   }
 
   void _onFileDecline(String msgId, String fromPeerId) {
@@ -537,7 +736,14 @@ class Chat extends ChangeNotifier {
     }
   }
 
-  void _onFileChunk(String msgId, int seq, Uint8List bytes, String fromPeerId) {
+  void _onFileChunk(String msgId, int offset, Uint8List bytes, String fromPeerId) {
+    final expected = _incomingOffset[msgId];
+    if (_incomingFrom[msgId] != fromPeerId || expected == null) return;
+    if (offset != expected) {
+      debugPrint('[chat] drop chunk id=$msgId offset=$offset expected=$expected');
+      return;
+    }
+    _incomingOffset[msgId] = expected + bytes.length;
     if (Platform.isAndroid && _androidChain.containsKey(msgId)) {
       final prev = _androidChain[msgId]!;
       _androidChain[msgId] = prev.then((_) async {
@@ -548,7 +754,7 @@ class Chat extends ChangeNotifier {
           'bytes': bytes,
         });
         // 写盘成功后才 ack — 让 sender 的窗口反映 receiver 的真实处理速度
-        _transport.sendChunkAck(fromPeerId, msgId, seq);
+        _transport.sendChunkAck(fromPeerId, msgId, offset);
         final idx = messages.lastIndexWhere((m) => m.id == msgId);
         if (idx != -1) {
           messages[idx].bytesTransferred += bytes.length;
@@ -556,14 +762,14 @@ class Chat extends ChangeNotifier {
         }
       }).catchError((e, st) {
         debugPrint('[chat] appendChunk failed id=$msgId: $e\n$st');
-        // 故意不 ack — sender 端 idle watchdog 会在 15s 后判 fail
+        // 故意不 ack — sender 端 idle watchdog 会判 fail
       });
       return;
     }
     final sink = _incomingSinks[msgId];
     if (sink == null) return;
     sink.add(bytes);
-    _transport.sendChunkAck(fromPeerId, msgId, seq);
+    _transport.sendChunkAck(fromPeerId, msgId, offset);
     final idx = messages.lastIndexWhere((m) => m.id == msgId);
     if (idx != -1) {
       messages[idx].bytesTransferred += bytes.length;
@@ -572,6 +778,8 @@ class Chat extends ChangeNotifier {
   }
 
   Future<void> _onFileEnd(String msgId) async {
+    _incomingOffset.remove(msgId);
+    _incomingPauseTimers.remove(msgId)?.cancel();
     if (Platform.isAndroid && _androidChain.containsKey(msgId)) {
       final prev = _androidChain.remove(msgId)!;
       try {
@@ -728,7 +936,7 @@ class Chat extends ChangeNotifier {
     _bumpPeerActivity(toId);
     notifyListeners();
     _outgoingFiles[msg.id] = file;
-    _transport.sendFileOffer(msg);
+    _transport.sendFileOffer(msg, initialPeers);
     return msg;
   }
 
@@ -741,28 +949,23 @@ class Chat extends ChangeNotifier {
   }
 
   void _maybeFinalizeFanout(ChatMessage msg) {
-    final allDone = msg.fanout.values.every((e) =>
-        e.state == FanoutState.delivered ||
-        e.state == FanoutState.declined ||
-        e.state == FanoutState.failed);
-    if (!allDone) return;
-    final anyDelivered = msg.fanout.values
-        .any((e) => e.state == FanoutState.delivered);
-    final allDeclined = msg.fanout.values
-        .every((e) => e.state == FanoutState.declined);
+    final outcome = aggregateFanout(msg.fanout.values.map((e) => e.state));
+    if (outcome == FanoutOutcome.inProgress) return;
     msg.offerPending = false;
-    if (anyDelivered) {
-      msg.status = SendStatus.delivered;
-      msg.declined = false;
-      msg.bytesTransferred = msg.fileSize ?? msg.bytesTransferred;
-    } else if (allDeclined) {
-      // 全部接收方主动拒绝 — 不算发送失败，只是流程到此结束
-      msg.status = SendStatus.delivered;
-      msg.declined = true;
-    } else {
-      // 没人收到且至少有传输失败 — 真正的发送失败
-      msg.status = SendStatus.failed;
-      msg.declined = false;
+    switch (outcome) {
+      case FanoutOutcome.delivered:
+        msg.status = SendStatus.delivered;
+        msg.declined = false;
+        msg.bytesTransferred = msg.fileSize ?? msg.bytesTransferred;
+      case FanoutOutcome.allDeclined:
+        // 全部接收方主动拒绝 — 不算发送失败，避免触发红色 Send failed 标记
+        msg.status = SendStatus.delivered;
+        msg.declined = true;
+      case FanoutOutcome.failed:
+        msg.status = SendStatus.failed;
+        msg.declined = false;
+      case FanoutOutcome.inProgress:
+        break;
     }
     _outgoingFiles.remove(msg.id);
   }
