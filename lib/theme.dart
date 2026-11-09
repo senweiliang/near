@@ -16,6 +16,7 @@ class AppColors {
   static const accentSoft = Color(0xFFE8EEF3);
   static const accentDeep = Color(0xFF36546A);
   static const presence = Color(0xFF5FB288);
+  static const danger = Color(0xFFC2503A);
 }
 
 class AppFonts {

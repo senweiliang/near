@@ -1,0 +1,10 @@
+name: near_signal
+description: Near coordination server — signaling relay + STUN. Never carries chat or file data.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  cryptography: ^2.9.0

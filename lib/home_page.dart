@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'chat.dart';
 import 'file_utils.dart';
 import 'peer.dart';
+import 'remote.dart';
 import 'settings_page.dart';
 import 'share_intake.dart';
 import 'theme.dart';

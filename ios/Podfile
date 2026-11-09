@@ -1,5 +1,5 @@
 # Uncomment this line to define a global platform for your project
-# platform :ios, '13.0'
+platform :ios, '15.5'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -36,8 +36,24 @@ target 'Runner' do
   end
 end
 
+# flutter_webrtc 枚举摄像头时用到 iOS 17 SDK 的常量；Near 不采集音视频，
+# 在 Xcode 15 以下把它们映射成旧 SDK 已有的常量，只为能编过。
+xcode_major = `xcodebuild -version`[/Xcode (\d+)/, 1].to_i
+
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      # 插件 pod 默认沿用旧的最低版本，跟 Runner 的 15.5 对齐（mobile_scanner 的 MLKit 要求）
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
+    end
+    next unless target.name == 'flutter_webrtc' && xcode_major < 15
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] += [
+        'AVCaptureDeviceTypeContinuityCamera=AVCaptureDeviceTypeBuiltInWideAngleCamera',
+        'AVCaptureDeviceTypeExternal=AVCaptureDeviceTypeBuiltInWideAngleCamera',
+      ]
+    end
   end
 end

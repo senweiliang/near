@@ -35,8 +35,20 @@ target 'Runner' do
   end
 end
 
+# flutter_webrtc 枚举摄像头时用到 macOS 14 SDK 的常量；Near 不采集音视频，
+# 在 Xcode 15 以下（SDK 13）把它们映射成旧 SDK 已有的常量，只为能编过。
+xcode_major = `xcodebuild -version`[/Xcode (\d+)/, 1].to_i
+
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
+    next unless target.name == 'flutter_webrtc' && xcode_major < 15
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] += [
+        'AVCaptureDeviceTypeContinuityCamera=AVCaptureDeviceTypeBuiltInWideAngleCamera',
+        'AVCaptureDeviceTypeExternal=AVCaptureDeviceTypeExternalUnknown',
+      ]
+    end
   end
 end

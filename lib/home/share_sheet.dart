@@ -32,8 +32,8 @@ class _ShareTargetSheet extends StatelessWidget {
                   _PeerTile(
                     avatar: const _GroupAvatar(),
                     title: 'Everyone here',
-                    meta: '${online.length} online',
-                    onTap: online.isEmpty ? null : () => pick(null),
+                    meta: '${chat.lanPeerCount} online',
+                    onTap: chat.lanPeerCount == 0 ? null : () => pick(null),
                   ),
                   for (final p in online)
                     _PeerTile(
@@ -41,7 +41,8 @@ class _ShareTargetSheet extends StatelessWidget {
                           text: _initial(p.name), kind: AvKind.normal, online: true),
                       title: p.name,
                       handle: _shortHandle(p.id),
-                      meta: p.host,
+                      chip: chat.isDirect(p.id) ? 'direct' : null,
+                      meta: chat.isDirect(p.id) ? 'direct' : p.host,
                       onTap: () => pick(p.id),
                     ),
                   if (online.isEmpty)

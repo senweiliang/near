@@ -31,6 +31,8 @@ class _PeerListView extends StatelessWidget {
         return 0;
       });
     final onlinePeers = peers.where((p) => p.online).toList(growable: false);
+    final directCount = onlinePeers.where((p) => chat.isDirect(p.id)).length;
+    final nearbyCount = onlinePeers.length - directCount;
     final onlineCount = onlinePeers.length + 1;
     final totalCount = peers.length + 1;
     final everyoneUnread = unread[null] ?? 0;
@@ -133,26 +135,33 @@ class _PeerListView extends StatelessWidget {
                                       height: 1.2,
                                     ),
                                   )
-                                : Text.rich(TextSpan(children: [
-                                    TextSpan(
-                                      text: '${onlinePeers.length} nearby',
-                                      style: AppFonts.body(
-                                        size: 13.5,
-                                        weight: FontWeight.w700,
-                                        color: AppColors.accent,
-                                        height: 1.2,
-                                      ),
-                                    ),
-                                    TextSpan(
-                                      text: ' on this network',
-                                      style: AppFonts.body(
-                                        size: 13.5,
-                                        weight: FontWeight.w600,
-                                        color: AppColors.ink,
-                                        height: 1.2,
-                                      ),
-                                    ),
-                                  ])),
+                                : Text.rich(
+                                    TextSpan(children: [
+                                      if (nearbyCount > 0) ...[
+                                        TextSpan(
+                                          text: '$nearbyCount nearby',
+                                          style: _heroCountStyle,
+                                        ),
+                                        TextSpan(
+                                          text: directCount > 0 ? ' · ' : ' on this network',
+                                          style: _heroTextStyle,
+                                        ),
+                                      ],
+                                      if (directCount > 0) ...[
+                                        TextSpan(
+                                          text: '$directCount direct',
+                                          style: _heroCountStyle,
+                                        ),
+                                        if (nearbyCount == 0)
+                                          TextSpan(
+                                            text: ' across networks',
+                                            style: _heroTextStyle,
+                                          ),
+                                      ],
+                                    ]),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                           ),
                         ],
                       ),
@@ -216,7 +225,7 @@ class _PeerListView extends StatelessWidget {
                     avatar: const _GroupAvatar(),
                     title: 'Everyone here',
                     meta: _peerPreview(chat, null) ??
-                        '$onlineCount in the room · open to all',
+                        '${nearbyCount + 1} in the room · open to all',
                     unread: everyoneUnread,
                     onTap: onTapEveryone,
                   ),
@@ -228,8 +237,8 @@ class _PeerListView extends StatelessWidget {
                           online: p.online),
                       title: p.name,
                       handle: _shortHandle(p.id),
-                      meta: _peerPreview(chat, p) ??
-                          (p.online ? p.host : 'offline'),
+                      chip: chat.isDirect(p.id) ? 'direct' : null,
+                      meta: _peerPreview(chat, p) ?? _peerStatusLine(chat, p),
                       unread: unread[p.id] ?? 0,
                       onTap: () => onTapPeer(p),
                     ),
@@ -238,6 +247,58 @@ class _PeerListView extends StatelessWidget {
             ),
 
           ],
+        ),
+      ),
+    );
+  }
+}
+
+final TextStyle _heroCountStyle = AppFonts.body(
+  size: 13.5,
+  weight: FontWeight.w700,
+  color: AppColors.accent,
+  height: 1.2,
+);
+
+final TextStyle _heroTextStyle = AppFonts.body(
+  size: 13.5,
+  weight: FontWeight.w600,
+  color: AppColors.ink,
+  height: 1.2,
+);
+
+/// 没有聊天记录时 peer 行 / 会话头显示的连接状态。
+String _peerStatusLine(Chat chat, Peer p) {
+  if (p.online) return chat.isDirect(p.id) ? 'direct' : p.host;
+  if (chat.isPaired(p.id) && chat.remote.statusOf(p.id) == DirectStatus.failed) {
+    return "can't connect directly";
+  }
+  if (chat.isPaired(p.id) && chat.remote.statusOf(p.id) == DirectStatus.connecting) {
+    return 'connecting…';
+  }
+  return 'offline';
+}
+
+/// 名字后的连接方式标签：跨网络直连的 peer 标 direct。
+class _RouteChip extends StatelessWidget {
+  final String label;
+  const _RouteChip(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+      decoration: BoxDecoration(
+        color: AppColors.accentSoft,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: AppFonts.mono(
+          size: 10.5,
+          color: AppColors.accentDeep,
+          letterSpacing: 0.2,
+          height: 1.4,
         ),
       ),
     );
@@ -412,6 +473,7 @@ class _PeerTile extends StatelessWidget {
   final Widget avatar;
   final String title;
   final String? handle;
+  final String? chip;
   final String? meta;
   final int unread;
   final VoidCallback? onTap;
@@ -419,6 +481,7 @@ class _PeerTile extends StatelessWidget {
     required this.avatar,
     required this.title,
     this.handle,
+    this.chip,
     this.meta,
     this.unread = 0,
     this.onTap,
@@ -462,6 +525,14 @@ class _PeerTile extends StatelessWidget {
                               size: 12,
                               color: AppColors.ink3,
                               letterSpacing: 0.24,
+                            ),
+                          ),
+                        if (chip != null)
+                          WidgetSpan(
+                            alignment: PlaceholderAlignment.middle,
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 6),
+                              child: _RouteChip(chip!),
                             ),
                           ),
                       ]),

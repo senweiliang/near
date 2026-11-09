@@ -375,12 +375,10 @@ class _ConversationPageState extends State<_ConversationPage> {
     final peer = isEveryone ? null : chat.peers[widget.recipientId];
     final title = isEveryone ? 'Everyone here' : (peer?.name ?? 'Unknown');
     final sub = isEveryone
-        ? '${chat.peers.length + 1} in the room · open to all'
+        ? '${chat.lanPeerCount + 1} in the room · open to all'
         : (peer == null
             ? 'unknown peer'
-            : (peer.online
-                ? '${_shortHandle(peer.id)} · ${peer.host}'
-                : '${_shortHandle(peer.id)} · offline'));
+            : '${_shortHandle(peer.id)} · ${_peerStatusLine(chat, peer)}');
 
     final keyConflict =
         isEveryone ? null : chat.conflictingFingerprint(widget.recipientId!);

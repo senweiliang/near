@@ -19,6 +19,54 @@ class ChannelLostException implements Exception {
   String toString() => 'ChannelLostException: $reason';
 }
 
+/// 一条到对端的字节通道：局域网是 WebSocket，跨网络是 WebRTC DataChannel。
+/// 上层的加密握手 / 帧格式与通道类型无关。
+abstract class PeerLink {
+  /// String（握手 hello）或 Uint8List（加密帧）
+  Stream<dynamic> get stream;
+  void add(Object data);
+  void close();
+  /// 跨网络打洞直连（非局域网）
+  bool get isRemote;
+  String get closeInfo;
+}
+
+class WsLink implements PeerLink {
+  final WebSocketChannel ws;
+  WsLink(this.ws);
+
+  @override
+  Stream<dynamic> get stream => ws.stream;
+  @override
+  void add(Object data) => ws.sink.add(data);
+  @override
+  void close() => ws.sink.close();
+  @override
+  bool get isRemote => false;
+  @override
+  String get closeInfo =>
+      'code=${ws.closeCode} reason="${ws.closeReason}" codeMeaning=${_closeCodeMeaning(ws.closeCode)}';
+}
+
+String _closeCodeMeaning(int? code) {
+  return switch (code) {
+    null => 'no-close-frame (transport torn down)',
+    1000 => 'normal',
+    1001 => 'going-away',
+    1002 => 'protocol-error (or surfaced from socket-tear-down)',
+    1003 => 'unsupported-data',
+    1005 => 'no-status',
+    1006 => 'abnormal-closure (no close-frame received)',
+    1007 => 'invalid-payload',
+    1008 => 'policy-violation',
+    1009 => 'message-too-big',
+    1010 => 'mandatory-ext',
+    1011 => 'internal-error',
+    1015 => 'tls-handshake',
+    _ => 'unknown',
+  };
+}
+
 class Transport {
   final String myId;
   final NearIdentity identity;
@@ -60,6 +108,17 @@ class Transport {
 
   Iterable<String> get connectedPeerIds => _channels.keys;
 
+  /// 群聊只覆盖同一局域网的 peer：「Everyone here」指这个网络里的人。
+  Iterable<String> get lanPeerIds =>
+      _channels.entries.where((e) => !e.value.link.isRemote).map((e) => e.key);
+
+  bool isRemote(String peerId) => _channels[peerId]?.link.isRemote ?? false;
+
+  bool hasLanChannelTo(String peerId) {
+    final conn = _channels[peerId];
+    return conn != null && !conn.link.isRemote;
+  }
+
   Transport({
     required this.myId,
     required this.identity,
@@ -81,7 +140,7 @@ class Transport {
     final handler = webSocketHandler(
       (WebSocketChannel ws, _) {
         debugPrint('[transport] incoming connection');
-        _attach(ws);
+        attachLink(WsLink(ws));
       },
     );
     // 监听 IPv6 + 兼容 IPv4（dual-stack），避免 mDNS 解析到 IPv6 时连不上
@@ -104,7 +163,7 @@ class Transport {
   Future<void> connectTo(String host, int peerPort, String peerId,
       {List<String> addresses = const [], bool force = false}) async {
     _knownPeers[peerId] = (host: host, port: peerPort, addresses: addresses);
-    if (_channels.containsKey(peerId)) {
+    if (hasLanChannelTo(peerId)) {
       debugPrint('[transport] already connected to $peerId, skip');
       return;
     }
@@ -120,7 +179,7 @@ class Transport {
     }
     try {
       for (final candidate in await _dialCandidates(host, addresses)) {
-        if (_channels.containsKey(peerId)) return;
+        if (hasLanChannelTo(peerId)) return;
         final url = 'ws://$candidate:$peerPort';
         debugPrint('[transport] dialing $url (peer=$peerId, original host=$host)');
         final ws = IOWebSocketChannel.connect(url, connectTimeout: _kDialTimeout);
@@ -130,7 +189,7 @@ class Transport {
           debugPrint('[transport] dial $url failed: $e');
           continue;
         }
-        _attach(ws, outgoing: true);
+        attachLink(WsLink(ws), outgoing: true);
         return;
       }
       debugPrint('[transport] all dial candidates failed for $peerId');
@@ -166,22 +225,23 @@ class Transport {
     _fallbackDials[peerId] = Timer(_kFallbackDialDelay, () {
       _fallbackDials.remove(peerId);
       final endpoint = _knownPeers[peerId];
-      if (endpoint == null || _channels.containsKey(peerId)) return;
+      if (endpoint == null || hasLanChannelTo(peerId)) return;
       debugPrint('[transport] $peerId did not dial us, dialing them instead');
       connectTo(endpoint.host, endpoint.port, peerId,
           addresses: endpoint.addresses, force: true);
     });
   }
 
-  Future<void> _attach(WebSocketChannel ws, {bool outgoing = false}) async {
+  /// [outgoing]：本端主动发起（LAN 拨号方 / WebRTC offer 方），用于双连接去重。
+  Future<void> attachLink(PeerLink link, {bool outgoing = false}) async {
     final session = await SecureSession.create(identity, myId);
-    final conn = _Connection(ws, session, outgoing: outgoing);
+    final conn = _Connection(link, session, outgoing: outgoing);
     try {
-      ws.sink.add(jsonEncode(await session.hello()));
+      link.add(jsonEncode(await session.hello()));
     } catch (e) {
       debugPrint('[transport] hello send failed: $e');
     }
-    ws.stream.listen(
+    link.stream.listen(
       (data) {
         // 解密是异步的，串成链保证按到达顺序处理
         conn.receiveChain = conn.receiveChain
@@ -192,8 +252,7 @@ class Transport {
       },
       onDone: () {
         debugPrint(
-            '[transport] channel done peerId=${conn.peerId} code=${ws.closeCode} reason="${ws.closeReason}" '
-            'codeMeaning=${_closeCodeMeaning(ws.closeCode)}');
+            '[transport] channel done peerId=${conn.peerId} remote=${link.isRemote} ${link.closeInfo}');
         _onConnectionGone(conn, 'channel closed');
       },
       onError: (Object e, StackTrace st) {
@@ -251,7 +310,7 @@ class Transport {
     }
     if (m['v'] == null) {
       debugPrint('[transport] $id runs an old unencrypted protocol, closing');
-      conn.ws.sink.close();
+      conn.link.close();
       return;
     }
     final Uint8List identityKey;
@@ -259,22 +318,25 @@ class Transport {
       identityKey = await conn.session.acceptHello(m);
     } on HandshakeException catch (e) {
       debugPrint('[transport] handshake with $id failed: $e');
-      conn.ws.sink.close();
+      conn.link.close();
       return;
     }
     if (!verifyPeerKey(id, identityKey)) {
       debugPrint('[transport] identity key of $id rejected, closing');
-      conn.ws.sink.close();
+      conn.link.close();
       return;
     }
     debugPrint('[transport] secure hello from $id');
     final existing = _channels[id];
     if (existing != null) {
-      // 双向同时拨通时两端须保留同一条，否则各关一条会两条全断：统一留 id 较小一方拨出的
-      final keepNew = conn.outgoing == (myId.compareTo(id) < 0);
+      // 局域网与跨网络并存时留局域网那条；同类型双向同时拨通时两端须保留同一条，
+      // 否则各关一条会两条全断：统一留 id 较小一方拨出的
+      final keepNew = existing.link.isRemote != conn.link.isRemote
+          ? !conn.link.isRemote
+          : conn.outgoing == (myId.compareTo(id) < 0);
       if (!keepNew) {
         debugPrint('[transport] dedupe close (already have $id)');
-        conn.ws.sink.close();
+        conn.link.close();
         return;
       }
       debugPrint('[transport] dedupe replace existing channel with $id');
@@ -282,14 +344,15 @@ class Transport {
       existing.closed = true;
       existing.keepAlive?.cancel();
       _failFlowsOn(existing, ChannelLostException('channel replaced'));
-      existing.ws.sink.close();
+      existing.link.close();
     }
     conn.peerId = id;
     _channels[id] = conn;
     conn.keepAlive = Timer.periodic(_keepAliveInterval, (_) {
       conn.post({'type': 'ping', 'token': 'ka-${DateTime.now().microsecondsSinceEpoch}'});
     });
-    debugPrint('[transport] channel established with $id, total=${_channels.length}');
+    debugPrint(
+        '[transport] channel established with $id remote=${conn.link.isRemote}, total=${_channels.length}');
     onChannelEstablished?.call(id);
   }
 
@@ -362,7 +425,7 @@ class Transport {
     final payload = {'type': 'msg', 'msg': msg.toJson()};
     if (msg.toId == null) {
       for (final conn in _channels.values) {
-        conn.post(payload);
+        if (!conn.link.isRemote) conn.post(payload);
       }
     } else {
       _postTo(msg.toId!, payload);
@@ -510,10 +573,11 @@ class Transport {
     flow.wake();
   }
 
-  int get peerCount => _channels.length;
+  int get lanPeerCount => lanPeerIds.length;
 
+  /// [toId] 为 null 表示群聊，只看局域网 peer。
   bool hasChannelTo(String? toId) {
-    if (toId == null) return _channels.isNotEmpty;
+    if (toId == null) return lanPeerIds.isNotEmpty;
     return _channels.containsKey(toId);
   }
 
@@ -525,7 +589,7 @@ class Transport {
       conn.keepAlive?.cancel();
       _failFlowsOn(conn, ChannelLostException('all channels closed'));
       try {
-        conn.ws.sink.close();
+        conn.link.close();
       } catch (_) {}
     }
   }
@@ -537,7 +601,7 @@ class Transport {
     conn.keepAlive?.cancel();
     _failFlowsOn(conn, ChannelLostException('peer dropped'));
     try {
-      conn.ws.sink.close();
+      conn.link.close();
     } catch (_) {}
     // _channels 已移除，onDone 的守卫会跳过回调，这里显式补一次让 chat 侧一致清理
     onChannelClosed?.call(peerId);
@@ -562,29 +626,10 @@ class Transport {
 
   void redialAll() {
     for (final entry in _knownPeers.entries) {
-      if (_channels.containsKey(entry.key)) continue;
+      if (hasLanChannelTo(entry.key)) continue;
       connectTo(entry.value.host, entry.value.port, entry.key,
           addresses: entry.value.addresses, force: true);
     }
-  }
-
-  String _closeCodeMeaning(int? code) {
-    return switch (code) {
-      null => 'no-close-frame (transport torn down)',
-      1000 => 'normal',
-      1001 => 'going-away',
-      1002 => 'protocol-error (or surfaced from socket-tear-down)',
-      1003 => 'unsupported-data',
-      1005 => 'no-status',
-      1006 => 'abnormal-closure (no close-frame received)',
-      1007 => 'invalid-payload',
-      1008 => 'policy-violation',
-      1009 => 'message-too-big',
-      1010 => 'mandatory-ext',
-      1011 => 'internal-error',
-      1015 => 'tls-handshake',
-      _ => 'unknown',
-    };
   }
 
   void _scheduleRedial(String peerId) {
@@ -596,7 +641,7 @@ class Transport {
       return;
     }
     Future.delayed(const Duration(seconds: 2), () {
-      if (_channels.containsKey(peerId)) return;
+      if (hasLanChannelTo(peerId)) return;
       debugPrint('[transport] redialing $peerId');
       connectTo(endpoint.host, endpoint.port, peerId,
           addresses: endpoint.addresses);
@@ -615,7 +660,7 @@ bool isDialableIPv4(String address) {
 }
 
 class _Connection {
-  final WebSocketChannel ws;
+  final PeerLink link;
   final SecureSession session;
   final bool outgoing;
   String? peerId; // 握手完成并纳入 _channels 后才设置
@@ -624,13 +669,13 @@ class _Connection {
   Future<void> receiveChain = Future.value();
   Future<void> _sendChain = Future.value();
 
-  _Connection(this.ws, this.session, {required this.outgoing});
+  _Connection(this.link, this.session, {required this.outgoing});
 
   /// 加密是异步的：串行化保证 nonce 计数与线上顺序一致。
   Future<void> send(InnerFrame frame) {
     final next = _sendChain.then((_) async {
       if (closed) throw ChannelLostException('channel closed');
-      ws.sink.add(await session.seal(frame.encode()));
+      link.add(await session.seal(frame.encode()));
     });
     _sendChain = next.catchError((_) {});
     return next;

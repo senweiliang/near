@@ -31,12 +31,17 @@ dependencies:
   archive: ^4.6.0
   flutter_local_notifications: ^22.3.3
   crypto: ^3.0.8
+  flutter_webrtc: ^1.6.3
+  mobile_scanner: 6.0.11
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.1
+  integration_test:
+    sdk: flutter
 
 flutter:
   uses-material-design: true

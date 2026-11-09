@@ -14,7 +14,9 @@ import 'package:uuid/uuid.dart';
 import 'discovery.dart';
 import 'notifications.dart';
 import 'peer.dart';
+import 'remote.dart';
 import 'secure_channel.dart';
+import 'signaling.dart';
 import 'transport.dart';
 
 class Chat extends ChangeNotifier {
@@ -55,6 +57,8 @@ class Chat extends ChangeNotifier {
 
   late final Transport _transport;
   late final Discovery _discovery;
+  late final SignalClient _signal;
+  late final Remote remote;
   Directory? _fileCacheDir;
 
   static const String _kAutoAcceptFiles = 'autoAcceptFiles';
@@ -62,6 +66,7 @@ class Chat extends ChangeNotifier {
   static const String _kStayConnected = 'stayConnectedInBackground';
   static const String _kIdentitySeed = 'identitySeed';
   static const String _kTrustedKeys = 'trustedKeys';
+  static const String _kPairedDevices = 'pairedDevices';
   // 连接断开后保留半截传输等待续传的时长
   static const Duration _kResumeGrace = Duration(seconds: 60);
   static const Duration _ackTimeout = Duration(milliseconds: 500);
@@ -125,6 +130,7 @@ class Chat extends ChangeNotifier {
       onChannelClosed: _onChannelClosed,
     );
     final port = await _transport.startServer();
+    await _startRemote(isTestMode);
 
     _discovery = Discovery(myId: myId, myName: myName, port: port);
     await _discovery.start(
@@ -135,6 +141,77 @@ class Chat extends ChangeNotifier {
       await _ensureBackgroundService();
     }
   }
+
+  Future<void> _startRemote(bool isTestMode) async {
+    var initial = <PairedDevice>[];
+    if (!isTestMode) {
+      final prefs = await SharedPreferences.getInstance();
+      final stored = prefs.getString(_kPairedDevices);
+      if (stored != null) {
+        initial = (jsonDecode(stored) as List)
+            .map((j) => PairedDevice.fromJson((j as Map).cast<String, dynamic>()))
+            .toList();
+      }
+    }
+    late final Remote created;
+    _signal = SignalClient(
+      identity: identity,
+      onRelay: (from, data) => created.onRelay(from, data),
+      onPresence: (key, online) => created.onPresence(key, online),
+      onUndeliverable: (to) => created.onUndeliverable(to),
+      onStateChanged: () => created.onSignalStateChanged(),
+    );
+    created = Remote(
+      myId: myId,
+      myName: () => myName,
+      signal: _signal,
+      attachLink: (link, outgoing) => _transport.attachLink(link, outgoing: outgoing),
+      hasChannel: (id) => _transport.hasChannelTo(id),
+      hasLanChannel: _transport.hasLanChannelTo,
+      onPaired: _onPaired,
+      onUnpaired: _onUnpaired,
+      onChanged: notifyListeners,
+      persist: (devices) async {
+        if (isTestMode) return;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+            _kPairedDevices, jsonEncode(devices.map((d) => d.toJson()).toList()));
+      },
+      initial: initial,
+    );
+    remote = created;
+    for (final device in initial) {
+      _ensurePairedPeer(device);
+    }
+    _signal.start();
+  }
+
+  void _ensurePairedPeer(PairedDevice device) {
+    final existing = peers[device.id];
+    if (existing != null) return;
+    peers[device.id] = Peer(id: device.id, name: device.name, host: '', port: 0, online: false);
+  }
+
+  void _onPaired(PairedDevice device) {
+    // 扫码配对是用户亲自确认过的身份，直接覆盖 TOFU 记录
+    _trustedKeys[device.id] = device.key;
+    _conflictingKeys.remove(device.id);
+    _persistTrustedKeys();
+    _ensurePairedPeer(device);
+    notifyListeners();
+  }
+
+  void _onUnpaired(PairedDevice device) {
+    if (_transport.isRemote(device.id)) _transport.dropPeer(device.id);
+    notifyListeners();
+  }
+
+  bool isPaired(String peerId) => remote.deviceById(peerId) != null;
+
+  /// 当前走的是跨网络直连（不是局域网）
+  bool isDirect(String peerId) => _transport.isRemote(peerId);
+
+  int get lanPeerCount => _transport.lanPeerCount;
 
   Future<NearIdentity> _loadIdentity(SharedPreferences prefs) async {
     final seed = prefs.getString(_kIdentitySeed);
@@ -303,6 +380,7 @@ class Chat extends ChangeNotifier {
       }
     }));
     _transport.redialAll();
+    remote.onResumed();
     if (changed) notifyListeners();
   }
 
@@ -335,7 +413,7 @@ class Chat extends ChangeNotifier {
     if (peerId == null) {
       // 群发：所有 connected peer 一起 bump
       final now = DateTime.now();
-      for (final pid in _transport.connectedPeerIds) {
+      for (final pid in _transport.lanPeerIds) {
         final p = peers[pid];
         if (p != null) p.lastActiveAt = now;
       }
@@ -440,7 +518,7 @@ class Chat extends ChangeNotifier {
       if (m.fromId != myId || !m.hasImage) continue;
       if (m.status != SendStatus.pending) continue;
       final targetGone =
-          m.toId == peerId || (m.toId == null && _transport.peerCount == 0);
+          m.toId == peerId || (m.toId == null && _transport.lanPeerCount == 0);
       if (targetGone) {
         m.status = SendStatus.failed;
         imageFailed = true;
@@ -451,6 +529,7 @@ class Chat extends ChangeNotifier {
       debugPrint('[chat] channel down $peerId → mark offline');
       p.online = false;
     }
+    remote.onChannelClosed(peerId);
     if (affected.isNotEmpty || imageFailed || offerFailed || (p != null && !p.online)) {
       notifyListeners();
     }
@@ -470,6 +549,11 @@ class Chat extends ChangeNotifier {
   }
 
   void _refreshPeerName(String fromId, String fromName) {
+    final device = remote.deviceById(fromId);
+    if (device != null && fromName.isNotEmpty && device.name != fromName) {
+      device.name = fromName;
+      remote.persist(remote.devices);
+    }
     final p = peers[fromId];
     if (p == null) return;
     if (fromName.isNotEmpty && p.name != fromName) {
@@ -918,10 +1002,10 @@ class Chat extends ChangeNotifier {
       offerPending: true,
     );
     final initialPeers = toId == null
-        ? _transport.connectedPeerIds.toList()
+        ? _transport.lanPeerIds.toList()
         : (_transport.hasChannelTo(toId) ? [toId] : <String>[]);
     debugPrint(
-        '[chat] sendFile id=${msg.id} initialPeers=$initialPeers peerCount=${_transport.peerCount}');
+        '[chat] sendFile id=${msg.id} initialPeers=$initialPeers lanPeerCount=${_transport.lanPeerCount}');
     if (initialPeers.isEmpty) {
       msg.offerPending = false;
       msg.status = SendStatus.failed;

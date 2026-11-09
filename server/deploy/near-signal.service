@@ -1,0 +1,19 @@
+[Unit]
+Description=Near coordination server (signaling + STUN, never carries user data)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/near-signal/near_signal --cert /opt/near-signal/cert.pem --key /opt/near-signal/key.pem --port 7443 --stun-port 3478
+Restart=always
+RestartSec=2
+User=near-signal
+Group=near-signal
+ReadOnlyPaths=/opt/near-signal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

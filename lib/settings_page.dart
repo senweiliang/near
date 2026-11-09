@@ -1,10 +1,13 @@
 import 'dart:io' show Platform;
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'chat.dart';
 import 'log.dart';
+import 'pair_page.dart';
+import 'remote.dart';
 import 'theme.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -203,6 +206,8 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ]),
           const SizedBox(height: 18),
+          _PairedDevicesSection(chat: widget.chat),
+          const SizedBox(height: 18),
           _Section(title: 'Receiving', children: [
             _ToggleRow(
               label: 'Auto-accept files',
@@ -301,10 +306,213 @@ class _SettingsPageState extends State<SettingsPage> {
       id.length <= 4 ? id : id.substring(0, 4);
 }
 
+class _PairedDevicesSection extends StatelessWidget {
+  final Chat chat;
+  const _PairedDevicesSection({required this.chat});
+
+  static String _statusText(DirectStatus status) => switch (status) {
+        DirectStatus.lan => 'on this network',
+        DirectStatus.connected => 'connected',
+        DirectStatus.connecting => 'connecting…',
+        DirectStatus.failed => "can't connect directly",
+        DirectStatus.offline => 'offline',
+      };
+
+  Future<void> _showMenu(BuildContext context, Offset position, PairedDevice device) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final choice = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(position & const Size(1, 1), Offset.zero & overlay.size),
+      color: AppColors.bgApp,
+      elevation: 6,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: const BorderSide(color: AppColors.line),
+      ),
+      items: [
+        PopupMenuItem(
+          value: 'unpair',
+          height: 40,
+          child: Text('Unpair',
+              style: AppFonts.body(size: 14, color: AppColors.danger)),
+        ),
+      ],
+    );
+    if (choice == 'unpair') chat.remote.unpair(device.id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final devices = chat.remote.devices;
+    final serverDown = !chat.remote.serverReachable;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _Section(
+          title: 'Paired devices',
+          trailing: devices.isEmpty ? null : '${devices.length}',
+          children: [
+            for (final device in devices) ...[
+              _PairedRow(
+                device: device,
+                status: chat.remote.statusOf(device.id),
+                statusText: _statusText(chat.remote.statusOf(device.id)),
+                onMenu: (position) => _showMenu(context, position, device),
+              ),
+              const _RowDivider(),
+            ],
+            InkWell(
+              onTap: () => Navigator.of(context).push(
+                CupertinoPageRoute(builder: (_) => PairPage(chat: chat)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.qr_code_2_rounded, size: 20, color: AppColors.accent),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Pair a device',
+                        style: AppFonts.body(
+                          size: 15,
+                          weight: FontWeight.w600,
+                          color: AppColors.accent,
+                        ),
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right_rounded, size: 22, color: AppColors.ink3),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 8, 6, 0),
+          child: Text(
+            serverDown
+                ? "Can't reach the coordination server — paired devices only connect on the same network for now."
+                : 'Off the same Wi-Fi, paired devices connect directly. '
+                    'A server only introduces them — your data never passes through it.',
+            style: AppFonts.mono(size: 11, color: AppColors.ink3, letterSpacing: 0.06, height: 1.55),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PairedRow extends StatelessWidget {
+  final PairedDevice device;
+  final DirectStatus status;
+  final String statusText;
+  final void Function(Offset globalPosition) onMenu;
+  const _PairedRow({
+    required this.device,
+    required this.status,
+    required this.statusText,
+    required this.onMenu,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final online = status == DirectStatus.connected || status == DirectStatus.lan;
+    final initial = device.name.isEmpty ? '?' : device.name.characters.first.toUpperCase();
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapUp: (d) => onMenu(d.globalPosition),
+      onLongPressStart: (d) => onMenu(d.globalPosition),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 4, 10),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 34,
+              height: 34,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Opacity(
+                    opacity: online ? 1 : 0.55,
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: const BoxDecoration(color: AppColors.surface2, shape: BoxShape.circle),
+                      alignment: Alignment.center,
+                      child: Text(
+                        initial,
+                        style: AppFonts.body(size: 13.5, weight: FontWeight.w700, color: AppColors.ink2, height: 1),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    right: -1,
+                    bottom: -1,
+                    child: Container(
+                      width: 11,
+                      height: 11,
+                      decoration: BoxDecoration(
+                        color: online ? AppColors.presence : AppColors.inkFaint,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: AppColors.surface, width: 2.5),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    device.name,
+                    style: AppFonts.body(size: 15, weight: FontWeight.w500, color: AppColors.ink),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '@${device.id.length <= 4 ? device.id : device.id.substring(0, 4)} · $statusText',
+                    style: AppFonts.mono(size: 11, color: AppColors.ink3, letterSpacing: 0.06),
+                  ),
+                ],
+              ),
+            ),
+            if (status == DirectStatus.connected)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+                decoration: BoxDecoration(
+                  color: AppColors.accentSoft,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text('direct',
+                    style: AppFonts.mono(size: 10.5, color: AppColors.accentDeep, letterSpacing: 0.2, height: 1.4)),
+              ),
+            Builder(
+              builder: (buttonContext) => IconButton(
+                splashRadius: 18,
+                icon: const Icon(Icons.more_horiz_rounded, size: 20, color: AppColors.ink3),
+                onPressed: () {
+                  final box = buttonContext.findRenderObject() as RenderBox;
+                  onMenu(box.localToGlobal(box.size.bottomRight(Offset.zero)));
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Section extends StatelessWidget {
   final String title;
+  final String? trailing;
   final List<Widget> children;
-  const _Section({required this.title, required this.children});
+  const _Section({required this.title, required this.children, this.trailing});
 
   @override
   Widget build(BuildContext context) {
@@ -313,13 +521,23 @@ class _Section extends StatelessWidget {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(6, 2, 6, 8),
-          child: Text(
-            title.toUpperCase(),
-            style: AppFonts.mono(
-              size: 11,
-              color: AppColors.ink3,
-              letterSpacing: 0.36,
-            ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                title.toUpperCase(),
+                style: AppFonts.mono(
+                  size: 11,
+                  color: AppColors.ink3,
+                  letterSpacing: 0.36,
+                ),
+              ),
+              if (trailing != null)
+                Text(
+                  trailing!,
+                  style: AppFonts.mono(size: 11, color: AppColors.ink3, letterSpacing: 0.36),
+                ),
+            ],
           ),
         ),
         Container(

@@ -41,6 +41,12 @@
 | `file_utils.dart` | `zipDirectory`：后台 isolate 把文件夹打成 zip |
 | `settings_page.dart` | 改昵称、auto-accept 文件 toggle、Stay-connected-in-background toggle（仅 Android）、查看调试日志 |
 | `log.dart` | 内存环形缓冲，给 settings 页展示 |
+| `signaling.dart` | 协调服务器客户端 `SignalClient`：wss + 自签证书固定（`kSignalServer.certSha256`）、Ed25519 challenge 认证、watch / presence / relay、指数退避重连 |
+| `remote.dart` | `Remote`：已配对设备（SharedPreferences `pairedDevices`）、扫码配对、按 presence 发起 WebRTC 打洞（`_Attempt`）、`DirectStatus` |
+| `rtc_link.dart` | `RtcLink`：把 WebRTC DataChannel 包成 `PeerLink`，二进制帧切片（单条消息上限约 256 KB）+ bufferedAmount 背压 |
+| `pair_page.dart` | 配对页：手机扫码 / 展示码、确认 sheet、配对成功页 |
+
+`server/`：独立 Dart 包，协调服务器（信令转发 + 最小 STUN），见三 ·「跨网络直连」。
 
 ---
 
@@ -169,6 +175,19 @@ iOS / macOS / Desktop 走 `getApplicationDocumentsDirectory()/near_files/{msgId}
 > 调试坑：曾以为 macOS ⌘+V 走 `NSTextInputContext.paste:` 会绕过 PasteTextIntent，加了 `FocusNode.onKeyEvent` 拦截。后来发现是 Debug build 跟 Release 是不同 binary，Local Network 权限要重新授权——表现上"粘贴 OK 但发不出去"被误读成拦截方案的问题。**测 paste/连接问题一律 build release 跑**。
 
 ---
+
+### 跨网络直连（扫码配对 + 协调服务器 + WebRTC 打洞）
+同一局域网仍然完全无服务器（mDNS + WebSocket）。跨网络时：
+
+- **配对**：一台设备展示二维码 `near://pair?id&n&k&t`（k = Ed25519 身份公钥 base64url，t = 一次性 token，5 分钟过期），另一台扫码后经服务器 relay `pair{token,id,name}`；展示方校验 token 后回 `pair_ok`，双方各存 `PairedDevice{id,key,name}`，并把 key 直接写入 TOFU `_trustedKeys`（扫码是用户亲自确认的身份，覆盖旧记录）。桌面没摄像头只展示码，手机可扫码也可展示（手机 ↔ 手机）
+- **协调服务器**（`server/bin/near_signal.dart`，部署在 101.200.167.45，TCP 7443 wss + UDP 3478 STUN）：客户端以身份公钥为地址，连接时签名服务器下发的 nonce 证明持有私钥；`watch` 列表**双向互相 watch 才互见 presence**；`relay` 只转发信令 JSON（有令牌桶限流）。**不配 TURN、不中转任何数据，打洞失败就是失败**（`DirectStatus.failed`，UI 显示 `can't connect directly`）
+- **TLS**：自签证书 + 客户端按 DER SHA-256 固定（`badCertificateCallback`），不需要域名/备案。服务器换证书 = 发新版客户端。部署：`server/deploy/deploy.sh root@host`（交叉编译 Linux 二进制 + systemd），首次部署打印证书指纹，填进 `lib/signaling.dart`
+- **建连**：双方互为 presence online 时，公钥较小一方发 `rtc_offer`，较大一方发 `rtc_request` 请对方发起（避免 glare）。ICE 只用自家 STUN。20s 超时判失败，60s 后重试；app resume 时立即重试
+- **Transport 复用**：DataChannel 包成 `PeerLink`（`RtcLink`），走跟 LAN 完全相同的加密握手 / 帧 / 文件窗口。去重时 LAN 优先：同一 peer 两条路并存时保留 LAN、关掉直连。LAN 拨号路径只看 `hasLanChannelTo`，直连在时仍会尝试 LAN
+- **群聊只覆盖局域网**：`lanPeerIds` / `hasChannelTo(null)` / 群发 `send` 都排除直连 peer（「Everyone here」= 这个网络里的人），直连 peer 只能私聊
+- **UI**：peer 行名字后 `direct` chip；hero 文案 `N nearby · M direct`；会话头 `@xxxx · direct`；Settings 新增 Paired devices（⋯ / 右键 / 长按 → Unpair，双向通知删除）。设计稿 `../lan-chat-designs/28-pair.html`
+- **本地 Xcode 14 兼容**：flutter_webrtc 枚举摄像头用到 macOS 14 / iOS 17 SDK 常量，`macos/Podfile`、`ios/Podfile` 在 Xcode < 15 时用预处理宏映射成旧常量（Near 不采集音视频，不影响功能）。`mobile_scanner` 钉在 6.0.11（7.x 的 Swift 代码要 Xcode 15）；它的 iOS 端依赖 MLKit，iOS 最低版本因此升到 15.5。iOS 本地 Xcode 14 仍编不过是 SDWebImage（file_picker 依赖）的老问题，与此无关
+- **测试**：`test/signal_test.dart` 起真实服务器进程测认证 / presence / relay / STUN / 证书固定；`integration_test/direct_test.dart` 在 macOS app 里跑两个节点的真实配对 + WebRTC + 文件传输（需先本地起服务器，命令见文件头注释）
 
 ## 四、设计方案
 

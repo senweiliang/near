@@ -16,6 +16,10 @@
 	</array>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Near saves received images to your photo library.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Near uses the camera to scan another device's pairing code.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Near does not record audio. This is required by the connection library it uses.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
