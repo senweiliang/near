@@ -54,14 +54,18 @@ jobs:
       - run: flutter config --enable-macos-desktop
       - run: flutter pub get
       - run: flutter build macos --release
+      # Flutter only builds universal; thin it into one zip per arch (~half the size each).
       - name: Package
         run: |
-          cd build/macos/Build/Products/Release
-          ditto -c -k --keepParent near.app "$GITHUB_WORKSPACE/near-macos.zip"
+          for arch in arm64 x86_64; do
+            tool/thin_macos_app.sh build/macos/Build/Products/Release/near.app "$arch" \
+              "thin/$arch/near.app" macos/Runner/Release.entitlements
+            (cd "thin/$arch" && ditto -c -k --keepParent near.app "$GITHUB_WORKSPACE/near-macos-$arch.zip")
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: near-macos
-          path: near-macos.zip
+          path: near-macos-*.zip
           retention-days: 14
 
   # ---------------------------------------------------------------- Android
@@ -81,13 +85,15 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --release
-      - name: Rename APK
-        run: cp build/app/outputs/flutter-apk/app-release.apk near-android.apk
+      - run: flutter build apk --release --split-per-abi
+      - name: Rename APKs
+        run: |
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk near-android-arm64.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk near-android-armv7.apk
       - uses: actions/upload-artifact@v4
         with:
           name: near-android
-          path: near-android.apk
+          path: near-android-*.apk
           retention-days: 14
 
   # ---------------------------------------------------------------- Release
@@ -113,6 +119,6 @@ jobs:
 
             ### Install
             - **Windows** — download `near-windows-x64.zip`, unzip anywhere, run `near.exe`.
-            - **macOS** — download `near-macos.zip`, unzip. This build is unsigned, so the first launch needs a right-click → **Open** (or run `xattr -dr com.apple.quarantine near.app`).
-            - **Android** — download `near-android.apk` and allow installs from your browser or files app. Signed with a debug key.
+            - **macOS** — download `near-macos-arm64.zip` (Apple Silicon, M1 and later) or `near-macos-x86_64.zip` (Intel), unzip. This build is unsigned, so the first launch needs a right-click → **Open** (or run `xattr -dr com.apple.quarantine near.app`).
+            - **Android** — download `near-android-arm64.apk` (almost every phone from the last ~8 years; use `near-android-armv7.apk` only on very old 32-bit devices) and allow installs from your browser or files app. Signed with a debug key.
             - **iOS** — not distributed yet. Build from source: `flutter run -d ios`.
