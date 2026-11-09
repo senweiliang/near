@@ -49,10 +49,12 @@ if (!force && myId.compareTo(peerId) > 0) {
 }
 ```
 
-服务端在 `hello` 阶段也会做一次 dedupe（`_channels.containsKey(id)` 则关闭新连接）。重连（redial）时也只有 ID 较小的一方负责，避免对称重连风暴。
+`hello` 阶段 dedupe：已有同 peer channel 时，两端统一保留「ID 较小一方拨出的那条」（新连接若是它就替换旧的，否则关新的）。不能简单"先到先留"——双向同时拨通时两端各留一条、各关另一条，结果两条全断。重连（redial）时也只有 ID 较小的一方负责，避免对称重连风暴。
+
+**兜底反向拨号**：ID 较大的一方等 `_kFallbackDialDelay`（5s）还没 channel 就自己 `force` 拨一次（discovery found 和 channel 断开后都会挂这个 timer）。场景：Windows 开 Clash TUN，ID 较小的 PC 拨不出去，原先两端会永远卡住。
 
 ### IPv4 lookup
-mDNS 解析出的主机名（`xxx.local.`）在某些网络下会优先解析到 IPv6 或被系统代理截胡，导致 dial 失败。`transport.dart:67` 强制 `InternetAddress.lookup(..., type: IPv4)` 拿到地址再拨号；server 端用 `anyIPv6` dual-stack 监听以兼容两边。
+mDNS 解析出的主机名（`xxx.local.`）在某些网络下会优先解析到 IPv6 或被系统代理截胡，导致 dial 失败。**代理 fake-ip**：Clash 等 TUN 模式会把 `.local` 解析到 `198.18.0.0/15` 假 IP，连上即被代理断开（`Connection closed before full header was received`）。所以广播 attrs 带 `ips`（本机可拨的局域网 IPv4，逗号分隔），拨号候选顺序 = attrs `ips` → lookup 结果（`isDialableIPv4` 过滤掉 fake-ip / loopback / link-local）→ hostname，每个候选 3s 超时依次试。`transport.dart:67` 强制 `InternetAddress.lookup(..., type: IPv4)` 拿到地址再拨号；server 端用 `anyIPv6` dual-stack 监听以兼容两边。
 
 ### Keepalive + 后台恢复探活
 - 每条 channel 10s 周期 ping，token 携带时间戳

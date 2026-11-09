@@ -239,7 +239,11 @@ class Chat extends ChangeNotifier {
       lastActiveAt: prev?.lastActiveAt,
     );
     peers[peer.id] = peer;
-    _transport.connectTo(peer.host, peer.port, peer.id);
+    final addresses = (attrs['ips'] ?? '')
+        .split(',')
+        .where((a) => a.isNotEmpty)
+        .toList();
+    _transport.connectTo(peer.host, peer.port, peer.id, addresses: addresses);
     notifyListeners();
   }
 

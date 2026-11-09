@@ -26,7 +26,10 @@ class Transport {
   HttpServer? _server;
   int port = 0;
   final Map<String, WebSocketChannel> _channels = {};
-  final Map<String, (String host, int port)> _knownPeers = {};
+  final Map<String, ({String host, int port, List<String> addresses})>
+      _knownPeers = {};
+  final Set<String> _dialing = {};
+  final Map<String, Timer> _fallbackDials = {};
   final Map<String, Completer<bool>> _pendingProbes = {};
   final Map<WebSocketChannel, Timer> _keepAlive = {};
   // 每个进行中的文件发送流（sender 端），按 (msgId, peerId) 复合 key 索引。
@@ -35,6 +38,8 @@ class Transport {
   final Map<String, _OutgoingFlow> _outgoingFlows = {};
   static String _flowKey(String msgId, String peerId) => '$msgId|$peerId';
   static const _keepAliveInterval = Duration(seconds: 10);
+  static const _kDialTimeout = Duration(seconds: 3);
+  static const _kFallbackDialDelay = Duration(seconds: 5);
   // 文件传输窗口大小：sender 持续塞 chunk 直到在途未 ack 字节达到上限，然后等 ack 腾位。
   // 1 MB 在 LAN BDP 之上、又能保证背压可控，单 peer 单文件场景内存占用 ≈ 1 MB。
   static const _kInflightBytesLimit = 1 * 1024 * 1024;
@@ -81,39 +86,80 @@ class Transport {
     return port;
   }
 
+  /// [addresses] 是对端在 mDNS attrs 里自报的局域网 IPv4，优先于解析 hostname 拨号。
   Future<void> connectTo(String host, int peerPort, String peerId,
-      {bool force = false}) async {
-    _knownPeers[peerId] = (host, peerPort);
+      {List<String> addresses = const [], bool force = false}) async {
+    _knownPeers[peerId] = (host: host, port: peerPort, addresses: addresses);
     if (_channels.containsKey(peerId)) {
       debugPrint('[transport] already connected to $peerId, skip');
       return;
     }
     if (!force && myId.compareTo(peerId) > 0) {
-      debugPrint('[transport] $peerId has lower id, waiting for them to connect');
+      debugPrint(
+          '[transport] $peerId has lower id, waiting for them to connect (fallback dial in ${_kFallbackDialDelay.inSeconds}s)');
+      _scheduleFallbackDial(peerId);
       return;
     }
-    final cleanHost = host.endsWith('.') ? host.substring(0, host.length - 1) : host;
-
-    // 把 mDNS 主机名解析成 IPv4，避免 IPv6 / 系统代理导致连不上
-    String dialHost = cleanHost;
-    try {
-      final addrs = await InternetAddress.lookup(cleanHost, type: InternetAddressType.IPv4);
-      if (addrs.isNotEmpty) dialHost = addrs.first.address;
-    } catch (e) {
-      debugPrint('[transport] lookup failed for $cleanHost: $e (fallback to hostname)');
+    if (!_dialing.add(peerId)) {
+      debugPrint('[transport] already dialing $peerId, skip');
+      return;
     }
+    try {
+      for (final candidate in await _dialCandidates(host, addresses)) {
+        if (_channels.containsKey(peerId)) return;
+        final url = 'ws://$candidate:$peerPort';
+        debugPrint('[transport] dialing $url (peer=$peerId, original host=$host)');
+        final ws = IOWebSocketChannel.connect(url, connectTimeout: _kDialTimeout);
+        try {
+          await ws.ready;
+        } catch (e) {
+          debugPrint('[transport] dial $url failed: $e');
+          continue;
+        }
+        _attach(ws, outgoing: true);
+        return;
+      }
+      debugPrint('[transport] all dial candidates failed for $peerId');
+    } finally {
+      _dialing.remove(peerId);
+    }
+  }
 
-    final url = 'ws://$dialHost:$peerPort';
-    debugPrint('[transport] dialing $url (peer=$peerId, original host=$host)');
-    runZonedGuarded(() {
-      final ws = IOWebSocketChannel.connect(url);
-      _attach(ws);
-    }, (e, st) {
-      debugPrint('[transport] dial error: $e');
+  Future<List<String>> _dialCandidates(String host, List<String> addresses) async {
+    final candidates = addresses.where(isDialableIPv4).toList();
+    final cleanHost = host.endsWith('.') ? host.substring(0, host.length - 1) : host;
+    // 强制 IPv4：.local 在某些网络下优先解析到 IPv6 导致拨不通
+    try {
+      final resolved =
+          await InternetAddress.lookup(cleanHost, type: InternetAddressType.IPv4);
+      for (final addr in resolved) {
+        if (!isDialableIPv4(addr.address)) {
+          debugPrint('[transport] skip resolved ${addr.address} for $cleanHost (proxy fake-ip / unusable)');
+          continue;
+        }
+        if (!candidates.contains(addr.address)) candidates.add(addr.address);
+      }
+    } catch (e) {
+      debugPrint('[transport] lookup failed for $cleanHost: $e');
+    }
+    if (candidates.isEmpty) candidates.add(cleanHost);
+    return candidates;
+  }
+
+  // id 较大的一方本该等对方拨过来；对方拨不通（如被代理劫持）时超时后反向拨一次
+  void _scheduleFallbackDial(String peerId) {
+    if (_fallbackDials.containsKey(peerId)) return;
+    _fallbackDials[peerId] = Timer(_kFallbackDialDelay, () {
+      _fallbackDials.remove(peerId);
+      final endpoint = _knownPeers[peerId];
+      if (endpoint == null || _channels.containsKey(peerId)) return;
+      debugPrint('[transport] $peerId did not dial us, dialing them instead');
+      connectTo(endpoint.host, endpoint.port, peerId,
+          addresses: endpoint.addresses, force: true);
     });
   }
 
-  void _attach(WebSocketChannel ws) {
+  void _attach(WebSocketChannel ws, {bool outgoing = false}) {
     String? peerId; // 只有这条连接被正式纳入 _channels 后才设置，避免 dedupe 关闭时误删
     ws.sink.add(jsonEncode({'type': 'hello', 'fromId': myId}));
     _keepAlive[ws] = Timer.periodic(_keepAliveInterval, (_) {
@@ -133,10 +179,20 @@ class Transport {
             case 'hello':
               final id = m['fromId'] as String;
               debugPrint('[transport] hello from $id');
-              if (_channels.containsKey(id)) {
-                debugPrint('[transport] dedupe close (already have $id)');
-                ws.sink.close();
-                return;
+              final existing = _channels[id];
+              if (existing != null) {
+                // 双向同时拨通时两端须保留同一条，否则各关一条会两条全断：统一留 id 较小一方拨出的
+                final keepNew = outgoing == (myId.compareTo(id) < 0);
+                if (!keepNew) {
+                  debugPrint('[transport] dedupe close (already have $id)');
+                  ws.sink.close();
+                  return;
+                }
+                debugPrint('[transport] dedupe replace existing channel with $id');
+                _channels.remove(id);
+                _keepAlive.remove(existing)?.cancel();
+                _failFlowsOf(id, StateError('channel replaced'));
+                existing.sink.close();
               }
               peerId = id;
               _channels[id] = ws;
@@ -552,7 +608,8 @@ class Transport {
   void redialAll() {
     for (final entry in _knownPeers.entries) {
       if (_channels.containsKey(entry.key)) continue;
-      connectTo(entry.value.$1, entry.value.$2, entry.key, force: true);
+      connectTo(entry.value.host, entry.value.port, entry.key,
+          addresses: entry.value.addresses, force: true);
     }
   }
 
@@ -594,14 +651,26 @@ class Transport {
     if (endpoint == null) return;
     if (myId.compareTo(peerId) > 0) {
       debugPrint('[transport] not redialing $peerId (lower id, expecting them to dial)');
+      _scheduleFallbackDial(peerId);
       return;
     }
     Future.delayed(const Duration(seconds: 2), () {
       if (_channels.containsKey(peerId)) return;
       debugPrint('[transport] redialing $peerId');
-      connectTo(endpoint.$1, endpoint.$2, peerId);
+      connectTo(endpoint.host, endpoint.port, peerId,
+          addresses: endpoint.addresses);
     });
   }
+}
+
+/// 排除 loopback、169.254 link-local，以及 Clash / Surge 等代理 TUN 模式的 fake-ip 段 198.18.0.0/15。
+bool isDialableIPv4(String address) {
+  final parsed = InternetAddress.tryParse(address);
+  if (parsed == null || parsed.type != InternetAddressType.IPv4) return false;
+  if (parsed.isLoopback || parsed.isLinkLocal) return false;
+  final raw = parsed.rawAddress;
+  if (raw[0] == 198 && (raw[1] == 18 || raw[1] == 19)) return false;
+  return true;
 }
 
 class _OutgoingFlow {

@@ -1,5 +1,9 @@
+import 'dart:io';
+
 import 'package:bonsoir/bonsoir.dart';
 import 'package:flutter/foundation.dart';
+
+import 'transport.dart';
 
 const _serviceType = '_near._tcp';
 
@@ -12,17 +16,38 @@ class Discovery {
 
   Discovery({required this.myId, required this.myName, required this.port});
 
+  // 自报本机局域网 IPv4，对端直接按 IP 拨号，绕开被代理劫持的 .local 解析
+  static Future<String> _localIPv4List() async {
+    try {
+      final interfaces =
+          await NetworkInterface.list(type: InternetAddressType.IPv4);
+      return interfaces
+          .expand((i) => i.addresses)
+          .map((a) => a.address)
+          .where(isDialableIPv4)
+          .join(',');
+    } catch (e) {
+      debugPrint('[discovery] list interfaces failed: $e');
+      return '';
+    }
+  }
+
+  Future<BonsoirService> _buildService() async {
+    final ips = await _localIPv4List();
+    return BonsoirService(
+      name: 'near-${myId.substring(0, 8)}',
+      type: _serviceType,
+      port: port,
+      attributes: {'id': myId, 'name': myName, if (ips.isNotEmpty) 'ips': ips},
+    );
+  }
+
   Future<void> start({
     required void Function(ResolvedBonsoirService) onPeerFound,
     required void Function(BonsoirService) onPeerLost,
   }) async {
-    final service = BonsoirService(
-      name: 'near-${myId.substring(0, 8)}',
-      type: _serviceType,
-      port: port,
-      attributes: {'id': myId, 'name': myName},
-    );
-    debugPrint('[discovery] starting broadcast: name=${service.name} port=$port');
+    final service = await _buildService();
+    debugPrint('[discovery] starting broadcast: name=${service.name} port=$port ips=${service.attributes['ips']}');
     _broadcast = BonsoirBroadcast(service: service);
     await _broadcast!.ready;
     await _broadcast!.start();
@@ -61,12 +86,7 @@ class Discovery {
     } catch (e) {
       debugPrint('[discovery] stop old broadcast failed: $e');
     }
-    final service = BonsoirService(
-      name: 'near-${myId.substring(0, 8)}',
-      type: _serviceType,
-      port: port,
-      attributes: {'id': myId, 'name': myName},
-    );
+    final service = await _buildService();
     final next = BonsoirBroadcast(service: service);
     _broadcast = next;
     try {
