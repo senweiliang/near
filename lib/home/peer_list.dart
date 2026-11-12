@@ -269,7 +269,7 @@ final TextStyle _heroTextStyle = AppFonts.body(
 
 /// 没有聊天记录时 peer 行 / 会话头显示的连接状态。
 String _peerStatusLine(Chat chat, Peer p) {
-  if (p.online) return chat.isDirect(p.id) ? 'direct' : p.host;
+  if (p.online) return chat.isDirect(p.id) ? 'direct' : (p.host.isEmpty ? 'on this network' : p.host);
   if (chat.isPaired(p.id) && chat.remote.statusOf(p.id) == DirectStatus.failed) {
     return "can't connect directly";
   }

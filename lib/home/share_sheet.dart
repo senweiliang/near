@@ -42,7 +42,7 @@ class _ShareTargetSheet extends StatelessWidget {
                       title: p.name,
                       handle: _shortHandle(p.id),
                       chip: chat.isDirect(p.id) ? 'direct' : null,
-                      meta: chat.isDirect(p.id) ? 'direct' : p.host,
+                      meta: _peerStatusLine(chat, p),
                       onTap: () => pick(p.id),
                     ),
                   if (online.isEmpty)

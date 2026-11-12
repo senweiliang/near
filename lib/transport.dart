@@ -84,6 +84,8 @@ class Transport {
   final void Function(String msgId, String fromPeerId) onFileCancel;
   final void Function(String peerId)? onChannelEstablished;
   final void Function(String peerId)? onChannelClosed;
+  /// 写进 hello 的昵称：对端收不到本机 mDNS 广播时，靠它在列表里显示我们。
+  final String Function()? myName;
 
   HttpServer? _server;
   int port = 0;
@@ -114,6 +116,9 @@ class Transport {
 
   bool isRemote(String peerId) => _channels[peerId]?.link.isRemote ?? false;
 
+  /// 对端 hello 里带的昵称（旧版本不带则为 null）
+  String? helloNameOf(String peerId) => _channels[peerId]?.peerName;
+
   bool hasLanChannelTo(String peerId) {
     final conn = _channels[peerId];
     return conn != null && !conn.link.isRemote;
@@ -134,6 +139,7 @@ class Transport {
     required this.onFileCancel,
     this.onChannelEstablished,
     this.onChannelClosed,
+    this.myName,
   });
 
   Future<int> startServer({InternetAddress? address}) async {
@@ -237,7 +243,9 @@ class Transport {
     final session = await SecureSession.create(identity, myId);
     final conn = _Connection(link, session, outgoing: outgoing);
     try {
-      link.add(jsonEncode(await session.hello()));
+      final name = myName?.call();
+      // name 不在签名范围内：只用于展示，身份仍由 idKey + TOFU 保证
+      link.add(jsonEncode({...await session.hello(), if (name != null) 'name': name}));
     } catch (e) {
       debugPrint('[transport] hello send failed: $e');
     }
@@ -347,6 +355,7 @@ class Transport {
       existing.link.close();
     }
     conn.peerId = id;
+    conn.peerName = m['name'] as String?;
     _channels[id] = conn;
     conn.keepAlive = Timer.periodic(_keepAliveInterval, (_) {
       conn.post({'type': 'ping', 'token': 'ka-${DateTime.now().microsecondsSinceEpoch}'});
@@ -664,6 +673,7 @@ class _Connection {
   final SecureSession session;
   final bool outgoing;
   String? peerId; // 握手完成并纳入 _channels 后才设置
+  String? peerName;
   bool closed = false;
   Timer? keepAlive;
   Future<void> receiveChain = Future.value();

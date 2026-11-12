@@ -128,6 +128,7 @@ class Chat extends ChangeNotifier {
       onFileCancel: _onFileCancel,
       onChannelEstablished: _onChannelEstablished,
       onChannelClosed: _onChannelClosed,
+      myName: () => myName,
     );
     final port = await _transport.startServer();
     await _startRemote(isTestMode);
@@ -444,7 +445,13 @@ class Chat extends ChangeNotifier {
 
   void _onChannelEstablished(String peerId) {
     final p = peers[peerId];
-    if (p != null && !p.online) {
+    if (p == null) {
+      // 对端连进来了但本机没收到它的 mDNS（手机开 VPN、路由器拦组播等），照样列出来
+      final name = _transport.helloNameOf(peerId);
+      debugPrint('[chat] channel up from undiscovered $peerId name=$name → add peer');
+      peers[peerId] = Peer(id: peerId, name: name ?? '?', host: '', port: 0);
+      notifyListeners();
+    } else if (!p.online) {
       debugPrint('[chat] channel up $peerId → mark online');
       p.online = true;
       notifyListeners();

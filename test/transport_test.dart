@@ -40,6 +40,7 @@ class _Node {
       onFileCancel: (_, _) {},
       onChannelEstablished: established.add,
       onChannelClosed: closed.add,
+      myName: () => 'name of $id',
     );
     await transport.startServer(address: InternetAddress.loopbackIPv4);
   }
@@ -82,6 +83,12 @@ void main() {
         id: 'm1', fromId: alice.id, fromName: 'alice', text: 'hi', ts: DateTime.now(), toId: bob.id));
     await _until(() => bob.messages.isNotEmpty);
     expect(bob.messages.single.text, 'hi');
+  });
+
+  test('hello carries the display name so an undiscovered dialer can still be listed', () async {
+    await connect();
+    expect(bob.transport.helloNameOf(alice.id), 'name of a-alice');
+    expect(alice.transport.helloNameOf(bob.id), 'name of b-bob');
   });
 
   test('message with spoofed fromId is dropped', () async {
