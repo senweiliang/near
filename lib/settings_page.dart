@@ -289,7 +289,7 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 24),
           Center(
             child: Text(
-              'Near · v0.3.2',
+              'Near · v0.3.3',
               style: AppFonts.mono(
                 size: 11,
                 color: AppColors.ink3,

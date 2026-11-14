@@ -90,6 +90,8 @@ class Remote {
   final Map<String, PairedDevice> _paired = {};
   final Set<String> _onlineKeys = {};
   final Map<String, _Attempt> _attempts = {};
+  // 发起方 setLocalDescription 时就开始吐候选，可能比 offer 先到；先按对端暂存，等对应 sid 的尝试建好再喂
+  final Map<String, List<Map<String, dynamic>>> _earlyCandidates = {};
   final Set<String> _failedKeys = {};
   final Map<String, Timer> _retryTimers = {};
   final Map<String, Completer<PairedDevice>> _pendingPairs = {};
@@ -208,7 +210,15 @@ class Remote {
       case 'rtc_answer':
         _attempts[fromKey]?.onAnswer(data);
       case 'rtc_ice':
-        _attempts[fromKey]?.onRemoteCandidate(data);
+        final attempt = _attempts[fromKey];
+        if (attempt != null && attempt.sid == data['sid']) {
+          attempt.onRemoteCandidate(data);
+        } else {
+          final early = _earlyCandidates.putIfAbsent(fromKey, () => []);
+          // 只留最新一轮尝试的
+          early.removeWhere((c) => c['sid'] != data['sid']);
+          early.add(data);
+        }
       case 'rtc_bye':
         final attempt = _attempts[fromKey];
         if (attempt != null && attempt.sid == data['sid']) attempt.fail('peer gave up');
@@ -348,6 +358,9 @@ class Remote {
       sid: sid ?? base64Url.encode(List<int>.generate(9, (_) => _random.nextInt(256))),
     );
     _attempts[device.key] = attempt;
+    for (final early in _earlyCandidates.remove(device.key) ?? const <Map<String, dynamic>>[]) {
+      if (early['sid'] == attempt.sid) attempt.onRemoteCandidate(early);
+    }
     onChanged();
     debugPrint('[remote] attempt ${attempt.sid} with ${device.name} offerer=$offerer');
     try {
@@ -419,6 +432,7 @@ class _Attempt {
     _pc = pc;
     pc.onIceCandidate = (candidate) {
       if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+      debugPrint('[remote] local candidate ${_describeCandidate(candidate.candidate!)}');
       _relay({
         'kind': 'rtc_ice',
         'c': candidate.candidate,
@@ -426,6 +440,7 @@ class _Attempt {
         'idx': candidate.sdpMLineIndex,
       });
     };
+    pc.onIceConnectionState = (state) => debugPrint('[remote] ice ${state.name} with ${device.name}');
     pc.onConnectionState = (state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) fail('ice failed');
     };
@@ -487,6 +502,7 @@ class _Attempt {
 
   Future<void> onRemoteCandidate(Map<String, dynamic> data) async {
     if (data['sid'] != sid) return;
+    debugPrint('[remote] remote candidate ${_describeCandidate(data['c'] as String? ?? '')}');
     final candidate =
         RTCIceCandidate(data['c'] as String?, data['mid'] as String?, data['idx'] as int?);
     if (!_remoteDescriptionSet) {
@@ -528,4 +544,12 @@ class _Attempt {
     }
     remote._attemptEnded(this, success: false, reason: reason);
   }
+}
+
+/// 「typ 地址:端口 协议」，用来看打洞失败时双方各自暴露了哪些地址。
+String _describeCandidate(String candidate) {
+  final parts = candidate.split(' ');
+  final typIndex = parts.indexOf('typ');
+  if (parts.length < 6 || typIndex < 0 || typIndex + 1 >= parts.length) return candidate;
+  return '${parts[typIndex + 1]} ${parts[4]}:${parts[5]} ${parts[2]}';
 }

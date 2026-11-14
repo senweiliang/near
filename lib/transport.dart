@@ -245,7 +245,7 @@ class Transport {
     try {
       final name = myName?.call();
       // name 不在签名范围内：只用于展示，身份仍由 idKey + TOFU 保证
-      link.add(jsonEncode({...await session.hello(), if (name != null) 'name': name}));
+      link.add(jsonEncode({...await session.hello(), 'name': ?name}));
     } catch (e) {
       debugPrint('[transport] hello send failed: $e');
     }
