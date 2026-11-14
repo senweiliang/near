@@ -1,3 +1,4 @@
+import 'package:cryptography/cryptography.dart';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -70,5 +71,14 @@ void main() {
         FanoutOutcome.allDeclined);
     expect(aggregateFanout([FanoutState.declined, FanoutState.failed]),
         FanoutOutcome.failed);
+  });
+
+  test('a zero salt derives the same key as the empty salt older versions used', () async {
+    final secret = SecretKey(List<int>.generate(32, (i) => i));
+    Future<List<int>> derive(List<int> salt) async =>
+        (await Hkdf(hmac: Hmac.sha256(), outputLength: 32)
+                .deriveKey(secretKey: secret, nonce: salt, info: [1, 2, 3]))
+            .extractBytes();
+    expect(await derive(List<int>.filled(32, 0)), await derive(const []));
   });
 }

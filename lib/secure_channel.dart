@@ -121,7 +121,8 @@ class SecureSession {
   static Future<SecretKey> _directionKey(SecretKey shared, List<int> senderEphemeral) {
     return Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
       secretKey: shared,
-      nonce: const [],
+      // 安卓原生 HMAC 拒绝空密钥；RFC 5869 规定空 salt 等价于 HashLen 个 0，派生结果不变
+      nonce: List<int>.filled(32, 0),
       info: [...utf8.encode('near-v$kProtocolVersion send '), ...senderEphemeral],
     );
   }
